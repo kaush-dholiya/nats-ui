@@ -1,0 +1,45 @@
+# Go binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.so.*
+*.dylib
+nats-ui
+nats-ui.exe
+
+# Go build cache
+.cache/
+dist/
+
+# Go modules
+vendor/
+go.sum
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.iml
+
+# Node modules and build
+node_modules/
+frontend-app/dist/
+frontend-app/build/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# NATS UI specific
+~/.nats-ui/
+.nats-ui/
+
+# Temporary files
+*.log
+*.tmp
+temp/
