@@ -4,6 +4,7 @@ export interface Connection {
   url: string
   username?: string
   password?: string
+  timeout?: number  // API timeout in seconds (0 or undefined = default 30s)
 }
 
 export interface ServerInfo {

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, X, Edit, Trash2, Pause, Play, ChevronDown, ChevronRight } from 'lucide-react'
+import { Plus, X, Trash2, Pause, Play, ChevronDown, ChevronRight } from 'lucide-react'
 import { api } from '../../lib/api'
 import type { StreamInfo } from '../../types'
 
@@ -13,7 +13,6 @@ interface StreamAdminProps {
 export function StreamAdmin({ connectionId, onClose, streams, onRefresh }: StreamAdminProps) {
   const [activeTab, setActiveTab] = useState<'create' | 'manage'>('manage')
   const [selectedStream, setSelectedStream] = useState<string | null>(null)
-  const [showCreateForm, setShowCreateForm] = useState(false)
   const [loading, setLoading] = useState(false)
 
   // Create stream form
@@ -40,7 +39,7 @@ export function StreamAdmin({ connectionId, onClose, streams, onRefresh }: Strea
       await api.createStream(connectionId, newStreamName, subjects)
       setNewStreamName('')
       setNewStreamSubjects('')
-      setShowCreateForm(false)
+      setActiveTab('manage')
       onRefresh()
     } catch (err: any) {
       alert(`Error: ${err.message}`)
@@ -105,7 +104,6 @@ export function StreamAdmin({ connectionId, onClose, streams, onRefresh }: Strea
               streams={streams}
               selectedStream={selectedStream}
               setSelectedStream={setSelectedStream}
-              onRefresh={onRefresh}
             />
           ) : (
             <CreateStreamTab
@@ -128,13 +126,11 @@ function ManageStreamsTab({
   streams,
   selectedStream,
   setSelectedStream,
-  onRefresh,
 }: {
   connectionId: string
   streams: StreamInfo[]
   selectedStream: string | null
   setSelectedStream: (s: string | null) => void
-  onRefresh: () => void
 }) {
   const [consumers, setConsumers] = useState<any[]>([])
   const [loadingConsumers, setLoadingConsumers] = useState(false)

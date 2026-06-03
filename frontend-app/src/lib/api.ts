@@ -1,18 +1,32 @@
 import type { Connection, ServerInfo, StreamInfo, ContentFilter, MessageEnvelope } from '../types'
 
 const BASE = '/api'
+let globalTimeout = 30  // Default timeout in seconds
 
-async function req<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(BASE + path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }))
-    throw new Error(err.error || 'Request failed')
+export function setGlobalTimeout(seconds: number) {
+  globalTimeout = seconds > 0 ? seconds : 30
+}
+
+async function req<T>(path: string, options?: RequestInit, timeoutSeconds?: number): Promise<T> {
+  const timeout = timeoutSeconds && timeoutSeconds > 0 ? timeoutSeconds : globalTimeout
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeout * 1000)
+
+  try {
+    const res = await fetch(BASE + path, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+      signal: controller.signal,
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }))
+      throw new Error(err.error || 'Request failed')
+    }
+    if (res.status === 204) return undefined as T
+    return res.json()
+  } finally {
+    clearTimeout(timeoutId)
   }
-  if (res.status === 204) return undefined as T
-  return res.json()
 }
 
 export const api = {
@@ -35,6 +49,52 @@ export const api = {
 
   // NATS ops - Streams
   getStreams: (id: string) => req<StreamInfo[]>(`/connections/${id}/streams`),
+  getStreamsPaginated: (id: string, offset: number, limit: number, search: string = '') => {
+    const params = new URLSearchParams()
+    params.append('offset', offset.toString())
+    params.append('limit', limit.toString())
+    if (search) params.append('search', search)
+    return req<{ streams: StreamInfo[]; total: number; offset: number; limit: number }>(`/connections/${id}/streams?${params}`)
+  },
+
+  // NATS ops - Consumers
+  getConsumersPaginated: (id: string, offset: number, limit: number, search: string = '') => {
+    const params = new URLSearchParams()
+    params.append('offset', offset.toString())
+    params.append('limit', limit.toString())
+    if (search) params.append('search', search)
+    return req<{ consumers: any[]; total: number; offset: number; limit: number }>(`/connections/${id}/consumers?${params}`)
+  },
+
+  // NATS ops - KV
+  createKVBucket: (id: string, name: string) =>
+    req<void>(`/connections/${id}/kv`, {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+  getKVBuckets: (id: string, offset: number, limit: number, search: string = '') => {
+    const params = new URLSearchParams()
+    params.append('offset', offset.toString())
+    params.append('limit', limit.toString())
+    if (search) params.append('search', search)
+    return req<{ buckets: any[]; total: number; offset: number; limit: number }>(`/connections/${id}/kv?${params}`)
+  },
+  getKVEntries: (id: string, bucket: string, offset: number, limit: number, search: string = '') => {
+    const params = new URLSearchParams()
+    params.append('offset', offset.toString())
+    params.append('limit', limit.toString())
+    if (search) params.append('search', search)
+    return req<{ entries: any[]; total: number; offset: number; limit: number }>(`/connections/${id}/kv/${bucket}?${params}`)
+  },
+  putKV: (id: string, bucket: string, key: string, value: string) =>
+    req<void>(`/connections/${id}/kv/${bucket}`, {
+      method: 'POST',
+      body: JSON.stringify({ key, value }),
+    }),
+  deleteKV: (id: string, bucket: string, key: string) =>
+    req<void>(`/connections/${id}/kv/${bucket}/${key}`, { method: 'DELETE' }),
+  deleteKVBucket: (id: string, bucket: string) =>
+    req<void>(`/connections/${id}/kv/${bucket}`, { method: 'DELETE' }),
   createStream: (id: string, name: string, subjects: string[]) =>
     req<void>(`/connections/${id}/streams`, {
       method: 'POST',

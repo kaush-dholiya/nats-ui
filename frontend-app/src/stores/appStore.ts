@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { Connection, ActiveSession, StreamInfo } from '../types'
-import { api } from '../lib/api'
+import { api, setGlobalTimeout } from '../lib/api'
 import { toast } from '../components/layout/Toast'
 
 interface AppState {
@@ -21,7 +21,7 @@ interface AppState {
   prefilledSubject: string
   setPrefilledSubject: (s: string) => void
 
-  activeView: 'connections' | 'dashboard' | 'streams' | 'messages' | 'publish'
+  activeView: 'connections' | 'dashboard' | 'streams' | 'consumers' | 'kv' | 'messages' | 'publish'
   setActiveView: (v: AppState['activeView']) => void
 }
 
@@ -61,6 +61,13 @@ export const useStore = create<AppState>((set, get) => ({
   connect: async (id) => {
     set({ session: { connectionId: id, serverInfo: null!, status: 'connecting' } })
     try {
+      // Set timeout for this connection
+      const { connections } = get()
+      const conn = connections.find(c => c.id === id)
+      if (conn?.timeout && conn.timeout > 0) {
+        setGlobalTimeout(conn.timeout)
+      }
+
       const { server } = await api.connect(id)
       set({ session: { connectionId: id, serverInfo: server, status: 'connected' }, activeView: 'dashboard' })
       toast('success', `Connected to ${server.name} v${server.version}`)

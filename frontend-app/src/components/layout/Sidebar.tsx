@@ -1,9 +1,11 @@
-import { Server, LayoutDashboard, Layers, Radio, Send, Unplug } from 'lucide-react'
+import { Server, LayoutDashboard, Layers, Users, Database, Radio, Send, Unplug } from 'lucide-react'
 import { useStore } from '../../stores/appStore'
 
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'streams', label: 'Streams', icon: Layers },
+  { id: 'consumers', label: 'Consumers', icon: Users },
+  { id: 'kv', label: 'KV Store', icon: Database },
   { id: 'messages', label: 'Subscribe', icon: Radio },
   { id: 'publish', label: 'Publish', icon: Send },
 ] as const

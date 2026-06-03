@@ -6,6 +6,7 @@ type Connection struct {
 	URL      string `json:"url"`
 	Username string `json:"username"`
 	Password string `json:"password,omitempty"`
+	Timeout  int    `json:"timeout"` // API timeout in seconds (0 = default 30s)
 }
 
 type ConnectRequest struct {
@@ -19,7 +20,7 @@ type PublishRequest struct {
 }
 
 type SubscribeRequest struct {
-	Subject      string       `json:"subject"`
+	Subject       string         `json:"subject"`
 	ContentFilter *ContentFilter `json:"contentFilter,omitempty"`
 }
 
@@ -33,20 +34,35 @@ type ContentFilter struct {
 }
 
 type StreamInfo struct {
-	Name      string `json:"name"`
+	Name      string   `json:"name"`
 	Subjects  []string `json:"subjects"`
-	Messages  uint64 `json:"messages"`
-	Bytes     uint64 `json:"bytes"`
-	Consumers int    `json:"consumers"`
+	Messages  uint64   `json:"messages"`
+	Bytes     uint64   `json:"bytes"`
+	Consumers int      `json:"consumers"`
+}
+
+type PaginatedStreams struct {
+	Streams []StreamInfo `json:"streams"`
+	Total   int          `json:"total"`
+	Offset  int          `json:"offset"`
+	Limit   int          `json:"limit"`
 }
 
 type ConsumerInfo struct {
-	Name           string `json:"name"`
-	DeliverPolicy  string `json:"deliverPolicy"`
-	AckPolicy      string `json:"ackPolicy"`
-	FilterSubject  string `json:"filterSubject"`
+	Name            string `json:"name"`
+	StreamName      string `json:"streamName,omitempty"` // Added for consumers list view
+	DeliverPolicy   string `json:"deliverPolicy"`
+	AckPolicy       string `json:"ackPolicy"`
+	FilterSubject   string `json:"filterSubject"`
 	PendingMessages uint64 `json:"pendingMessages"`
-	PausedUntil    string `json:"pausedUntil,omitempty"`
+	PausedUntil     string `json:"pausedUntil,omitempty"`
+}
+
+type PaginatedConsumers struct {
+	Consumers []ConsumerInfo `json:"consumers"`
+	Total     int            `json:"total"`
+	Offset    int            `json:"offset"`
+	Limit     int            `json:"limit"`
 }
 
 type MessageEnvelope struct {
@@ -55,7 +71,7 @@ type MessageEnvelope struct {
 	Headers   map[string]string `json:"headers"`
 	Timestamp int64             `json:"timestamp"`
 	Sequence  uint64            `json:"sequence,omitempty"`
-	Matched   bool              `json:"matched"` // did it match content filter?
+	Matched   bool              `json:"matched"`             // did it match content filter?
 	MatchPath string            `json:"matchPath,omitempty"` // which path matched
 }
 
@@ -71,4 +87,35 @@ type ServerInfo struct {
 	Version    string `json:"version"`
 	MaxPayload int64  `json:"maxPayload"`
 	JetStream  bool   `json:"jetstream"`
+}
+
+type KVBucketInfo struct {
+	Name       string `json:"name"`
+	Entries    uint64 `json:"entries"`
+	Bytes      uint64 `json:"bytes"`
+	CreatedAt  int64  `json:"createdAt"`
+	LastUpdate int64  `json:"lastUpdate"`
+}
+
+type PaginatedKVBuckets struct {
+	Buckets []KVBucketInfo `json:"buckets"`
+	Total   int            `json:"total"`
+	Offset  int            `json:"offset"`
+	Limit   int            `json:"limit"`
+}
+
+type KVEntry struct {
+	Key       string `json:"key"`
+	Value     string `json:"value"`
+	Bytes     int    `json:"bytes"`
+	Timestamp int64  `json:"timestamp"`
+	Revision  uint64 `json:"revision"`
+	Operation string `json:"operation"` // "PUT" or "DEL"
+}
+
+type PaginatedKVEntries struct {
+	Entries []KVEntry `json:"entries"`
+	Total   int       `json:"total"`
+	Offset  int       `json:"offset"`
+	Limit   int       `json:"limit"`
 }

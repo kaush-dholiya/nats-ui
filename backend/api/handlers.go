@@ -35,7 +35,14 @@ func (h *Handler) RegisterRoutes(app *fiber.App) {
 	api.Get("/connections/:id/status", h.status)
 
 	// NATS operations
-	api.Get("/connections/:id/streams", h.getStreams)
+	api.Get("/connections/:id/streams", h.getStreamsHandler)
+	api.Get("/connections/:id/consumers", h.getConsumersHandler)
+	api.Post("/connections/:id/kv", h.createKVBucketHandler)
+	api.Get("/connections/:id/kv", h.getKVBucketsHandler)
+	api.Get("/connections/:id/kv/:bucket", h.getKVEntriesHandler)
+	api.Post("/connections/:id/kv/:bucket", h.putKVHandler)
+	api.Delete("/connections/:id/kv/:bucket/:key", h.deleteKVHandler)
+	api.Delete("/connections/:id/kv/:bucket", h.deleteKVBucketHandler)
 	api.Post("/connections/:id/streams", h.createStream)
 	api.Delete("/connections/:id/streams/:stream", h.deleteStream)
 	api.Post("/connections/:id/streams/:stream/purge", h.purgeStream)
@@ -116,6 +123,21 @@ func (h *Handler) status(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"connected": connected})
 }
 
+func (h *Handler) getStreamsHandler(c *fiber.Ctx) error {
+	// Check if pagination parameters are present
+	hasOffset := c.Query("offset") != ""
+	hasLimit := c.Query("limit") != ""
+	hasSearch := c.Query("search") != ""
+
+	// If any pagination parameter is present, use paginated endpoint
+	if hasOffset || hasLimit || hasSearch {
+		return h.getStreamsPaginated(c)
+	}
+
+	// Otherwise, use the old endpoint for backward compatibility
+	return h.getStreams(c)
+}
+
 func (h *Handler) getStreams(c *fiber.Ctx) error {
 	streams, err := h.bridge.GetStreams(c.Params("id"))
 	if err != nil {
@@ -124,14 +146,53 @@ func (h *Handler) getStreams(c *fiber.Ctx) error {
 	return c.JSON(streams)
 }
 
+func (h *Handler) getStreamsPaginated(c *fiber.Ctx) error {
+	offset := c.QueryInt("offset", 0)
+	limit := c.QueryInt("limit", 50)
+	search := c.Query("search", "")
+
+	result, err := h.bridge.GetStreamsPaginated(c.Params("id"), offset, limit, search)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(result)
+}
+
+func (h *Handler) getConsumersHandler(c *fiber.Ctx) error {
+	// Check if pagination parameters are present
+	hasOffset := c.Query("offset") != ""
+	hasLimit := c.Query("limit") != ""
+	hasSearch := c.Query("search") != ""
+
+	// If any pagination parameter is present, use paginated endpoint
+	if hasOffset || hasLimit || hasSearch {
+		return h.getConsumersPaginated(c)
+	}
+
+	// Otherwise, return error (consumers endpoint requires pagination)
+	return c.Status(400).JSON(fiber.Map{"error": "pagination parameters required"})
+}
+
+func (h *Handler) getConsumersPaginated(c *fiber.Ctx) error {
+	offset := c.QueryInt("offset", 0)
+	limit := c.QueryInt("limit", 50)
+	search := c.Query("search", "")
+
+	result, err := h.bridge.GetConsumersPaginated(c.Params("id"), offset, limit, search)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(result)
+}
+
 func (h *Handler) getStreamMessages(c *fiber.Ctx) error {
 	var req struct {
 		Limit         int                   `json:"limit"`
 		ContentFilter *models.ContentFilter `json:"contentFilter"`
-		StartSeq      uint64                `json:"startSeq"`    // Start sequence (0 = no filter)
-		EndSeq        uint64                `json:"endSeq"`      // End sequence (0 = no filter)
-		StartTime     int64                 `json:"startTime"`   // Start timestamp in ms (0 = no filter)
-		EndTime       int64                 `json:"endTime"`     // End timestamp in ms (0 = no filter)
+		StartSeq      uint64                `json:"startSeq"`  // Start sequence (0 = no filter)
+		EndSeq        uint64                `json:"endSeq"`    // End sequence (0 = no filter)
+		StartTime     int64                 `json:"startTime"` // Start timestamp in ms (0 = no filter)
+		EndTime       int64                 `json:"endTime"`   // End timestamp in ms (0 = no filter)
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
@@ -206,10 +267,10 @@ func (h *Handler) getConsumers(c *fiber.Ctx) error {
 
 func (h *Handler) createConsumer(c *fiber.Ctx) error {
 	var req struct {
-		Name            string `json:"name"`
-		Filter          string `json:"filter"`
-		DeliverPolicy   string `json:"deliverPolicy"`
-		AckPolicy       string `json:"ackPolicy"`
+		Name          string `json:"name"`
+		Filter        string `json:"filter"`
+		DeliverPolicy string `json:"deliverPolicy"`
+		AckPolicy     string `json:"ackPolicy"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
@@ -239,6 +300,72 @@ func (h *Handler) resumeConsumer(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"status": "resumed"})
+}
+
+// KV handlers
+func (h *Handler) createKVBucketHandler(c *fiber.Ctx) error {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := h.bridge.CreateKVBucket(c.Params("id"), req.Name); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"status": "created"})
+}
+
+func (h *Handler) getKVBucketsHandler(c *fiber.Ctx) error {
+	offset := c.QueryInt("offset", 0)
+	limit := c.QueryInt("limit", 50)
+	search := c.Query("search", "")
+
+	result, err := h.bridge.GetKVBucketsPaginated(c.Params("id"), offset, limit, search)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(result)
+}
+
+func (h *Handler) getKVEntriesHandler(c *fiber.Ctx) error {
+	offset := c.QueryInt("offset", 0)
+	limit := c.QueryInt("limit", 50)
+	search := c.Query("search", "")
+
+	result, err := h.bridge.GetKVEntriesPaginated(c.Params("id"), c.Params("bucket"), offset, limit, search)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(result)
+}
+
+func (h *Handler) putKVHandler(c *fiber.Ctx) error {
+	var req struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	if err := h.bridge.PutKV(c.Params("id"), c.Params("bucket"), req.Key, req.Value); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"status": "updated"})
+}
+
+func (h *Handler) deleteKVHandler(c *fiber.Ctx) error {
+	if err := h.bridge.DeleteKV(c.Params("id"), c.Params("bucket"), c.Params("key")); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+func (h *Handler) deleteKVBucketHandler(c *fiber.Ctx) error {
+	if err := h.bridge.DeleteKVBucket(c.Params("id"), c.Params("bucket")); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(fiber.Map{"status": "deleted"})
 }
 
 func (h *Handler) subscribeWS(c *websocket.Conn) {

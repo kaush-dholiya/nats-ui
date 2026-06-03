@@ -3,7 +3,7 @@ import {
   Layers, Users, HardDrive, MessageSquare,
   ChevronRight, RefreshCw, Search, X,
   Radio, Send, Filter, ChevronDown, Play, Loader2,
-  Trash2, MoreVertical, Edit, Zap
+  Trash2, Zap
 } from 'lucide-react'
 import { useStore } from '../../stores/appStore'
 import { api } from '../../lib/api'
@@ -24,23 +24,67 @@ const FILTER_TYPES: { value: FilterType; label: string }[] = [
 ]
 
 export function StreamsView() {
-  const { session, streams, loadStreams } = useStore()
+  const { session } = useStore()
   const [selected, setSelected] = useState<StreamInfo | null>(null)
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
+  const [offset, setOffset] = useState(0)
+  const [limit] = useState(50)
+  const [paginatedData, setPaginatedData] = useState<{ streams: StreamInfo[]; total: number; offset: number; limit: number } | null>(null)
+  const [searchTimeout, setSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null)
 
-  const refresh = async () => {
+  const loadPaginatedStreams = async (searchQuery: string, pageOffset: number) => {
+    if (!session?.connectionId) return
     setLoading(true)
-    await loadStreams()
-    setLoading(false)
+    try {
+      const result = await api.getStreamsPaginated(session.connectionId, pageOffset, limit, searchQuery)
+      setPaginatedData(result)
+    } catch (err: any) {
+      console.error('Failed to load streams:', err)
+      setPaginatedData({ streams: [], total: 0, offset: pageOffset, limit })
+    } finally {
+      setLoading(false)
+    }
   }
 
-  useEffect(() => { refresh() }, [])
+  // Handle search with debouncing
+  const handleSearch = (value: string) => {
+    setSearch(value)
+    setOffset(0)
+    if (searchTimeout) clearTimeout(searchTimeout)
+    const timeout = setTimeout(() => {
+      loadPaginatedStreams(value, 0)
+    }, 300)
+    setSearchTimeout(timeout)
+  }
 
-  const filtered = (streams ?? []).filter(s =>
-    s.name.toLowerCase().includes(search.toLowerCase()) ||
-    (s.subjects ?? []).some(sub => sub.toLowerCase().includes(search.toLowerCase()))
-  )
+  const handleNextPage = () => {
+    const newOffset = offset + limit
+    if (paginatedData && newOffset < paginatedData.total) {
+      setOffset(newOffset)
+      loadPaginatedStreams(search, newOffset)
+    }
+  }
+
+  const handlePrevPage = () => {
+    const newOffset = Math.max(0, offset - limit)
+    setOffset(newOffset)
+    loadPaginatedStreams(search, newOffset)
+  }
+
+  useEffect(() => {
+    if (session?.connectionId) {
+      setOffset(0)
+      setSearch('')
+      if (searchTimeout) clearTimeout(searchTimeout)
+      loadPaginatedStreams('', 0)
+    }
+  }, [session?.connectionId])
+
+  const streams = paginatedData?.streams ?? []
+  const total = paginatedData?.total ?? 0
+  const currentPage = Math.floor(offset / limit) + 1
+  const totalPages = Math.ceil(total / limit)
 
   return (
     <div className="animate-fade-in" style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
@@ -58,10 +102,10 @@ export function StreamsView() {
             <div>
               <h1 style={{ fontSize: '20px', fontWeight: 600, letterSpacing: '-0.3px' }}>Streams</h1>
               <p style={{ color: 'var(--text-secondary)', fontSize: '12px', marginTop: '3px' }}>
-                {(streams ?? []).length} JetStream stream{(streams ?? []).length !== 1 ? 's' : ''}
+                {total} total {total !== 1 ? 'streams' : 'stream'}{search ? ` • Page ${currentPage}/${totalPages}` : ''}
               </p>
             </div>
-            <button onClick={refresh} style={{
+            <button onClick={() => loadPaginatedStreams(search, offset)} style={{
               background: 'var(--bg-elevated)', border: '1px solid var(--border)',
               borderRadius: '7px', padding: '7px', cursor: 'pointer', color: 'var(--text-secondary)',
               display: 'flex', alignItems: 'center',
@@ -71,8 +115,8 @@ export function StreamsView() {
           </div>
           <div style={{ position: 'relative' }}>
             <Search size={13} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
-            <input value={search} onChange={e => setSearch(e.target.value)}
-              placeholder="Search streams or subjects…"
+            <input value={search} onChange={e => handleSearch(e.target.value)}
+              placeholder="Search streams by name…"
               style={{
                 width: '100%', padding: '8px 10px 8px 30px',
                 background: 'var(--bg-elevated)', border: '1px solid var(--border)',
@@ -82,8 +126,8 @@ export function StreamsView() {
           </div>
         </div>
 
-        <div style={{ flex: 1, overflow: 'auto', padding: '0 10px 10px' }}>
-          {filtered.length === 0 ? (
+        <div style={{ flex: 1, overflow: 'auto', padding: '0 10px 10px', display: 'flex', flexDirection: 'column' }}>
+          {streams.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-dim)' }}>
               <Layers size={28} style={{ margin: '0 auto 12px', opacity: 0.3 }} />
               <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
@@ -91,15 +135,54 @@ export function StreamsView() {
               </p>
             </div>
           ) : (
-            filtered.map(stream => (
-              <StreamRow
-                key={stream.name}
-                stream={stream}
-                selected={selected?.name === stream.name}
-                onClick={() => setSelected(selected?.name === stream.name ? null : stream)}
-                connectionId={session?.connectionId || ''}
-              />
-            ))
+            <>
+              <div style={{ flex: 1, overflow: 'auto' }}>
+                {streams.map(stream => (
+                  <StreamRow
+                    key={stream.name}
+                    stream={stream}
+                    selected={selected?.name === stream.name}
+                    onClick={() => setSelected(selected?.name === stream.name ? null : stream)}
+                    connectionId={session?.connectionId || ''}
+                  />
+                ))}
+              </div>
+              {totalPages > 1 && (
+                <div style={{ padding: '12px 10px 0', borderTop: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-dim)' }}>
+                  <div>
+                    Showing {offset + 1}–{Math.min(offset + limit, total)} of {total}
+                  </div>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <button
+                      onClick={handlePrevPage}
+                      disabled={offset === 0}
+                      style={{
+                        padding: '4px 8px', borderRadius: '5px',
+                        background: offset === 0 ? 'var(--bg-surface)' : 'var(--bg-elevated)',
+                        border: '1px solid var(--border)', cursor: offset === 0 ? 'not-allowed' : 'pointer',
+                        color: offset === 0 ? 'var(--text-dim)' : 'var(--text-secondary)', fontSize: '11px',
+                        opacity: offset === 0 ? 0.5 : 1,
+                      }}
+                    >
+                      ← Prev
+                    </button>
+                    <button
+                      onClick={handleNextPage}
+                      disabled={offset + limit >= total}
+                      style={{
+                        padding: '4px 8px', borderRadius: '5px',
+                        background: offset + limit >= total ? 'var(--bg-surface)' : 'var(--bg-elevated)',
+                        border: '1px solid var(--border)', cursor: offset + limit >= total ? 'not-allowed' : 'pointer',
+                        color: offset + limit >= total ? 'var(--text-dim)' : 'var(--text-secondary)', fontSize: '11px',
+                        opacity: offset + limit >= total ? 0.5 : 1,
+                      }}
+                    >
+                      Next →
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>

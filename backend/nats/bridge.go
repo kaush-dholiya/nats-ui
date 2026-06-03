@@ -146,6 +146,185 @@ func (b *Bridge) GetStreams(connectionID string) ([]models.StreamInfo, error) {
 	}
 }
 
+// GetStreamsPaginated fetches streams with pagination and filtering support
+func (b *Bridge) GetStreamsPaginated(connectionID string, offset, limit int, searchFilter string) (*models.PaginatedStreams, error) {
+	b.mu.RLock()
+	ac, ok := b.connections[connectionID]
+	b.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	if ac.JS == nil {
+		return &models.PaginatedStreams{Streams: []models.StreamInfo{}, Total: 0, Offset: offset, Limit: limit}, nil
+	}
+
+	// Validate pagination params
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	// Normalize search filter to lowercase for case-insensitive matching
+	searchLower := strings.ToLower(searchFilter)
+
+	// Use a channel with timeout to prevent hanging
+	done := make(chan *models.PaginatedStreams, 1)
+	go func() {
+		allStreams := make([]models.StreamInfo, 0)
+
+		// Fetch all streams and apply filter
+		for info := range ac.JS.Streams() {
+			nameLower := strings.ToLower(info.Config.Name)
+
+			// Apply search filter if provided
+			if searchLower != "" && !strings.Contains(nameLower, searchLower) {
+				continue
+			}
+
+			si := models.StreamInfo{
+				Name:      info.Config.Name,
+				Subjects:  info.Config.Subjects,
+				Messages:  info.State.Msgs,
+				Bytes:     info.State.Bytes,
+				Consumers: info.State.Consumers,
+			}
+			allStreams = append(allStreams, si)
+		}
+
+		// Calculate pagination
+		total := len(allStreams)
+		start := offset
+		end := offset + limit
+
+		if start > total {
+			start = total
+		}
+		if end > total {
+			end = total
+		}
+
+		paginatedStreams := allStreams[start:end]
+		if paginatedStreams == nil {
+			paginatedStreams = []models.StreamInfo{}
+		}
+
+		done <- &models.PaginatedStreams{
+			Streams: paginatedStreams,
+			Total:   total,
+			Offset:  offset,
+			Limit:   limit,
+		}
+	}()
+
+	// Wait for result or timeout after 12 seconds (increased from 5)
+	select {
+	case result := <-done:
+		return result, nil
+	case <-time.After(12 * time.Second):
+		return nil, fmt.Errorf("stream listing timed out")
+	}
+}
+
+// GetConsumersPaginated fetches all consumers across all streams with pagination and filtering
+func (b *Bridge) GetConsumersPaginated(connectionID string, offset, limit int, searchFilter string) (*models.PaginatedConsumers, error) {
+	b.mu.RLock()
+	ac, ok := b.connections[connectionID]
+	b.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	if ac.JS == nil {
+		return &models.PaginatedConsumers{Consumers: []models.ConsumerInfo{}, Total: 0, Offset: offset, Limit: limit}, nil
+	}
+
+	// Validate pagination params
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	// Normalize search filter to lowercase for case-insensitive matching
+	searchLower := strings.ToLower(searchFilter)
+
+	// Use a channel with timeout to prevent hanging
+	done := make(chan *models.PaginatedConsumers, 1)
+	go func() {
+		allConsumers := make([]models.ConsumerInfo, 0)
+
+		// Iterate through all streams and their consumers
+		for streamInfo := range ac.JS.Streams() {
+			streamName := streamInfo.Config.Name
+
+			// Iterate through consumers of this stream
+			for consumerInfo := range ac.JS.Consumers(streamName) {
+				// Apply search filter if provided
+				if searchLower != "" {
+					consumerNameLower := strings.ToLower(consumerInfo.Name)
+					streamNameLower := strings.ToLower(streamName)
+					filterSubjectLower := strings.ToLower(consumerInfo.Config.FilterSubject)
+
+					// Check if any of the three fields match
+					if !strings.Contains(consumerNameLower, searchLower) &&
+						!strings.Contains(streamNameLower, searchLower) &&
+						!strings.Contains(filterSubjectLower, searchLower) {
+						continue
+					}
+				}
+
+				consumer := models.ConsumerInfo{
+					Name:            consumerInfo.Name,
+					StreamName:      streamName,
+					DeliverPolicy:   fmt.Sprintf("%v", consumerInfo.Config.DeliverPolicy),
+					AckPolicy:       fmt.Sprintf("%v", consumerInfo.Config.AckPolicy),
+					FilterSubject:   consumerInfo.Config.FilterSubject,
+					PendingMessages: consumerInfo.NumPending,
+				}
+				allConsumers = append(allConsumers, consumer)
+			}
+		}
+
+		// Calculate pagination
+		total := len(allConsumers)
+		start := offset
+		end := offset + limit
+
+		if start > total {
+			start = total
+		}
+		if end > total {
+			end = total
+		}
+
+		paginatedConsumers := allConsumers[start:end]
+		if paginatedConsumers == nil {
+			paginatedConsumers = []models.ConsumerInfo{}
+		}
+
+		done <- &models.PaginatedConsumers{
+			Consumers: paginatedConsumers,
+			Total:     total,
+			Offset:    offset,
+			Limit:     limit,
+		}
+	}()
+
+	// Wait for result or timeout after 12 seconds
+	select {
+	case result := <-done:
+		return result, nil
+	case <-time.After(12 * time.Second):
+		return nil, fmt.Errorf("consumer listing timed out")
+	}
+}
+
 // GetStreamMessages fetches stored messages from a JetStream stream (not live subscribe)
 func (b *Bridge) GetStreamMessages(connectionID, streamName string, limit int, filter *models.ContentFilter, startSeq, endSeq uint64, startTime, endTime int64) ([]models.MessageEnvelope, error) {
 	b.mu.RLock()
@@ -305,7 +484,6 @@ func (b *Bridge) HandleSubscribeWS(connectionID string, req models.SubscribeRequ
 	if !ok {
 		return fmt.Errorf("not connected")
 	}
-
 
 	filterEngine, err := NewContentFilterEngine(req.ContentFilter)
 	if err != nil {
@@ -542,4 +720,255 @@ func (b *Bridge) ResumeConsumer(connectionID, streamName, consumerName string) e
 	// For now, we acknowledge the resume request
 	_, err := ac.JS.ConsumerInfo(streamName, consumerName)
 	return err
+}
+
+// KV Store Methods
+
+func (b *Bridge) GetKVBucketsPaginated(connectionID string, offset, limit int, searchFilter string) (*models.PaginatedKVBuckets, error) {
+	b.mu.RLock()
+	ac, ok := b.connections[connectionID]
+	b.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	if ac.JS == nil {
+		return &models.PaginatedKVBuckets{Buckets: []models.KVBucketInfo{}, Total: 0, Offset: offset, Limit: limit}, nil
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	searchLower := strings.ToLower(searchFilter)
+
+	done := make(chan *models.PaginatedKVBuckets, 1)
+	go func() {
+		allBuckets := make([]models.KVBucketInfo, 0)
+
+		// Get all KV buckets
+		for streamInfo := range ac.JS.Streams() {
+			// KV buckets are stored as streams with name pattern "KV_<bucket-name>"
+			if !strings.HasPrefix(streamInfo.Config.Name, "KV_") {
+				continue
+			}
+
+			bucketName := strings.TrimPrefix(streamInfo.Config.Name, "KV_")
+			if searchLower != "" && !strings.Contains(strings.ToLower(bucketName), searchLower) {
+				continue
+			}
+
+			bucket := models.KVBucketInfo{
+				Name:       bucketName,
+				Entries:    streamInfo.State.Msgs,
+				Bytes:      streamInfo.State.Bytes,
+				CreatedAt:  time.Now().UnixMilli(), // Would need stream metadata for actual creation time
+				LastUpdate: time.Now().UnixMilli(),
+			}
+			allBuckets = append(allBuckets, bucket)
+		}
+
+		total := len(allBuckets)
+		start := offset
+		end := offset + limit
+
+		if start > total {
+			start = total
+		}
+		if end > total {
+			end = total
+		}
+
+		paginatedBuckets := allBuckets[start:end]
+		if paginatedBuckets == nil {
+			paginatedBuckets = []models.KVBucketInfo{}
+		}
+
+		done <- &models.PaginatedKVBuckets{
+			Buckets: paginatedBuckets,
+			Total:   total,
+			Offset:  offset,
+			Limit:   limit,
+		}
+	}()
+
+	select {
+	case result := <-done:
+		return result, nil
+	case <-time.After(12 * time.Second):
+		return nil, fmt.Errorf("KV bucket listing timed out")
+	}
+}
+
+func (b *Bridge) GetKVEntriesPaginated(connectionID, bucketName string, offset, limit int, searchFilter string) (*models.PaginatedKVEntries, error) {
+	b.mu.RLock()
+	ac, ok := b.connections[connectionID]
+	b.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	if ac.JS == nil {
+		return nil, fmt.Errorf("JetStream not available")
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	searchLower := strings.ToLower(searchFilter)
+
+	// Get KV bucket (creates if doesn't exist)
+	kv, err := ac.JS.KeyValue(bucketName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get KV bucket: %w", err)
+	}
+
+	done := make(chan *models.PaginatedKVEntries, 1)
+	go func() {
+		allEntries := make([]models.KVEntry, 0)
+
+		// Get all keys from bucket
+		keys, err := kv.Keys()
+		if err == nil {
+			for _, key := range keys {
+				if searchLower != "" && !strings.Contains(strings.ToLower(key), searchLower) {
+					continue
+				}
+
+				entry, err := kv.Get(key)
+				if err != nil {
+					continue // Skip deleted entries
+				}
+
+				kvEntry := models.KVEntry{
+					Key:       key,
+					Value:     string(entry.Value()),
+					Bytes:     len(entry.Value()),
+					Timestamp: entry.Created().UnixMilli(),
+					Revision:  entry.Revision(),
+					Operation: "PUT",
+				}
+				allEntries = append(allEntries, kvEntry)
+			}
+		}
+
+		total := len(allEntries)
+		start := offset
+		end := offset + limit
+
+		if start > total {
+			start = total
+		}
+		if end > total {
+			end = total
+		}
+
+		paginatedEntries := allEntries[start:end]
+		if paginatedEntries == nil {
+			paginatedEntries = []models.KVEntry{}
+		}
+
+		done <- &models.PaginatedKVEntries{
+			Entries: paginatedEntries,
+			Total:   total,
+			Offset:  offset,
+			Limit:   limit,
+		}
+	}()
+
+	select {
+	case result := <-done:
+		return result, nil
+	case <-time.After(12 * time.Second):
+		return nil, fmt.Errorf("KV entries listing timed out")
+	}
+}
+
+func (b *Bridge) PutKV(connectionID, bucketName, key, value string) error {
+	b.mu.RLock()
+	ac, ok := b.connections[connectionID]
+	b.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("not connected")
+	}
+
+	if ac.JS == nil {
+		return fmt.Errorf("JetStream not available")
+	}
+
+	kv, err := ac.JS.KeyValue(bucketName)
+	if err != nil {
+		return fmt.Errorf("failed to get KV bucket: %w", err)
+	}
+
+	_, err = kv.Put(key, []byte(value))
+	return err
+}
+
+func (b *Bridge) DeleteKV(connectionID, bucketName, key string) error {
+	b.mu.RLock()
+	ac, ok := b.connections[connectionID]
+	b.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("not connected")
+	}
+
+	if ac.JS == nil {
+		return fmt.Errorf("JetStream not available")
+	}
+
+	kv, err := ac.JS.KeyValue(bucketName)
+	if err != nil {
+		return fmt.Errorf("failed to get KV bucket: %w", err)
+	}
+
+	return kv.Delete(key)
+}
+
+func (b *Bridge) CreateKVBucket(connectionID, bucketName string) error {
+	b.mu.RLock()
+	ac, ok := b.connections[connectionID]
+	b.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("not connected")
+	}
+
+	if ac.JS == nil {
+		return fmt.Errorf("JetStream not available")
+	}
+
+	// CreateKeyValue creates the bucket if it doesn't exist
+	_, err := ac.JS.CreateKeyValue(&gonats.KeyValueConfig{
+		Bucket: bucketName,
+	})
+	return err
+}
+
+func (b *Bridge) DeleteKVBucket(connectionID, bucketName string) error {
+	b.mu.RLock()
+	ac, ok := b.connections[connectionID]
+	b.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("not connected")
+	}
+
+	if ac.JS == nil {
+		return fmt.Errorf("JetStream not available")
+	}
+
+	// KV buckets are stored as streams with name pattern "KV_<bucket-name>"
+	return ac.JS.DeleteStream("KV_" + bucketName)
 }

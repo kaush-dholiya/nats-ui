@@ -4,7 +4,7 @@ import { useStore } from '../../stores/appStore'
 import { toast } from '../layout/Toast'
 import type { Connection } from '../../types'
 
-const emptyForm = { name: '', url: 'nats://localhost:4222', username: '', password: '' }
+const emptyForm = { name: '', url: 'nats://localhost:4222', username: '', password: '', timeout: 30 }
 
 export function ConnectionManager() {
   const { connections, loadConnections, addConnection, updateConnection, deleteConnection, connect } = useStore()
@@ -19,7 +19,7 @@ export function ConnectionManager() {
 
   const openCreate = () => { setForm(emptyForm); setEditId(null); setShowForm(true); setError(null) }
   const openEdit = (c: Connection) => {
-    setForm({ name: c.name, url: c.url, username: c.username || '', password: '' })
+    setForm({ name: c.name, url: c.url, username: c.username || '', password: '', timeout: c.timeout || 30 })
     setEditId(c.id)
     setShowForm(true)
     setError(null)
@@ -179,6 +179,7 @@ function ConnectionCard({ connection, onConnect, onEdit, onDelete, isConnecting 
           <div style={{ color: 'var(--text-secondary)', fontSize: '12px', fontFamily: 'var(--font-mono)', marginTop: '2px' }}>
             {connection.url}
             {connection.username && <span style={{ marginLeft: '8px', color: 'var(--text-dim)' }}>• {connection.username}</span>}
+            {connection.timeout && <span style={{ marginLeft: '8px', color: 'var(--text-dim)' }}>• {connection.timeout}s timeout</span>}
           </div>
         </div>
       </div>
@@ -282,6 +283,11 @@ function ConnectionForm({ form, setForm, editId, showPassword, setShowPassword, 
               </div>
             </Field>
           </div>
+          <Field label="API Timeout (seconds)">
+            <input type="number" min="5" max="300" value={form.timeout || 30} onChange={e => setForm({ ...form, timeout: parseInt(e.target.value) || 30 })}
+              placeholder="30" style={inputStyle} />
+            <p style={{ fontSize: '11px', color: 'var(--text-dim)', marginTop: '4px' }}>Request timeout (5-300 seconds, default 30)</p>
+          </Field>
         </div>
 
         {error && (
