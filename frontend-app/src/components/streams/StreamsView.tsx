@@ -596,7 +596,27 @@ function MessagesTab({ messages, loading, error, limit, setLimit, showFilter, se
       )}
 
       {/* Messages */}
-      {messages.length === 0 && !loading ? (
+      {loading ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+          {[...Array(5)].map((_, i) => (
+            <div key={i} style={{
+              borderRadius: '6px', border: '1px solid var(--border-subtle)',
+              background: 'var(--bg-elevated)', padding: '7px 10px',
+              height: '40px', display: 'flex', alignItems: 'center',
+              opacity: 0.5,
+            }}>
+              <div style={{
+                display: 'flex', gap: '8px', width: '100%',
+                animation: 'pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+              }}>
+                <div style={{ width: '120px', height: '12px', background: 'var(--border)', borderRadius: '3px' }} />
+                <div style={{ flex: 1, height: '12px', background: 'var(--border)', borderRadius: '3px' }} />
+                <div style={{ width: '80px', height: '12px', background: 'var(--border)', borderRadius: '3px' }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : messages.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-dim)' }}>
           <MessageSquare size={24} style={{ margin: '0 auto 10px', opacity: 0.3 }} />
           <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>No messages found</p>

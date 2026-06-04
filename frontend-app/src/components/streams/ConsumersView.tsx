@@ -137,7 +137,27 @@ export function ConsumersView() {
         </div>
 
         <div style={{ flex: 1, overflow: 'auto', padding: '0 10px 10px', display: 'flex', flexDirection: 'column' }}>
-          {consumers.length === 0 ? (
+          {loading ? (
+            <div style={{ flex: 1, overflow: 'auto' }}>
+              {[...Array(6)].map((_, i) => (
+                <div key={i} style={{ marginBottom: '8px' }}>
+                  <div style={{
+                    padding: '11px 12px', borderRadius: '8px', marginBottom: '3px',
+                    background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+                    opacity: 0.5,
+                  }}>
+                    <div style={{
+                      display: 'flex', alignItems: 'center', gap: '9px',
+                      animation: 'pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    }}>
+                      <div style={{ width: '120px', height: '12px', background: 'var(--border)', borderRadius: '3px' }} />
+                      <div style={{ flex: 1, height: '12px', background: 'var(--border)', borderRadius: '3px' }} />
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : consumers.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-dim)' }}>
               <Users size={28} style={{ margin: '0 auto 12px', opacity: 0.3 }} />
               <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>

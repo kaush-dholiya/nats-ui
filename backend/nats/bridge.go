@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"nats-ui/config"
 	"nats-ui/models"
 
 	"github.com/gofiber/websocket/v2"
@@ -24,20 +25,22 @@ type ActiveConnection struct {
 }
 
 type Bridge struct {
-	mu          sync.RWMutex
-	connections map[string]*ActiveConnection
+	mu            sync.RWMutex
+	connections   map[string]*ActiveConnection
+	timeoutConfig *config.TimeoutConfig
 }
 
-func NewBridge() *Bridge {
+func NewBridge(cfg *config.TimeoutConfig) *Bridge {
 	return &Bridge{
-		connections: make(map[string]*ActiveConnection),
+		connections:   make(map[string]*ActiveConnection),
+		timeoutConfig: cfg,
 	}
 }
 
 func (b *Bridge) Connect(conn models.Connection) (*models.ServerInfo, error) {
 	opts := []gonats.Option{
 		gonats.Name("nats-ui"),
-		gonats.Timeout(5 * time.Second),
+		gonats.Timeout(b.timeoutConfig.ConnectionTimeout),
 	}
 
 	if conn.Username != "" {
@@ -137,11 +140,11 @@ func (b *Bridge) GetStreams(connectionID string) ([]models.StreamInfo, error) {
 		done <- result
 	}()
 
-	// Wait for result or timeout after 5 seconds
+	// Wait for result or timeout
 	select {
 	case result := <-done:
 		return result, nil
-	case <-time.After(5 * time.Second):
+	case <-time.After(b.timeoutConfig.StreamListTimeout):
 		return streams, fmt.Errorf("stream listing timed out")
 	}
 }
@@ -220,11 +223,11 @@ func (b *Bridge) GetStreamsPaginated(connectionID string, offset, limit int, sea
 		}
 	}()
 
-	// Wait for result or timeout after 12 seconds (increased from 5)
+	// Wait for result or timeout
 	select {
 	case result := <-done:
 		return result, nil
-	case <-time.After(12 * time.Second):
+	case <-time.After(b.timeoutConfig.StreamListTimeout):
 		return nil, fmt.Errorf("stream listing timed out")
 	}
 }
@@ -316,11 +319,11 @@ func (b *Bridge) GetConsumersPaginated(connectionID string, offset, limit int, s
 		}
 	}()
 
-	// Wait for result or timeout after 12 seconds
+	// Wait for result or timeout
 	select {
 	case result := <-done:
 		return result, nil
-	case <-time.After(12 * time.Second):
+	case <-time.After(b.timeoutConfig.ConsumerListTimeout):
 		return nil, fmt.Errorf("consumer listing timed out")
 	}
 }
@@ -395,7 +398,7 @@ func (b *Bridge) GetStreamMessages(connectionID, streamName string, limit int, f
 	}
 	defer sub.Unsubscribe()
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(b.timeoutConfig.MessageFetchTimeout)
 	for len(results) < limit && time.Now().Before(deadline) {
 		msg, err := sub.NextMsg(500 * time.Millisecond)
 		if err != nil {
@@ -799,7 +802,7 @@ func (b *Bridge) GetKVBucketsPaginated(connectionID string, offset, limit int, s
 	select {
 	case result := <-done:
 		return result, nil
-	case <-time.After(12 * time.Second):
+	case <-time.After(b.timeoutConfig.KVListTimeout):
 		return nil, fmt.Errorf("KV bucket listing timed out")
 	}
 }
@@ -888,7 +891,7 @@ func (b *Bridge) GetKVEntriesPaginated(connectionID, bucketName string, offset, 
 	select {
 	case result := <-done:
 		return result, nil
-	case <-time.After(12 * time.Second):
+	case <-time.After(b.timeoutConfig.KVListTimeout):
 		return nil, fmt.Errorf("KV entries listing timed out")
 	}
 }

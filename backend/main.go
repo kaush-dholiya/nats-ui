@@ -4,6 +4,7 @@ import (
 	"log"
 
 	"nats-ui/api"
+	"nats-ui/config"
 	natsBridge "nats-ui/nats"
 	"nats-ui/store"
 
@@ -13,14 +14,24 @@ import (
 )
 
 func main() {
+	// Load timeout configuration from environment variables
+	timeoutConfig := config.LoadTimeoutConfig()
+	log.Printf("Loaded timeout config - Connection: %v, StreamList: %v, ConsumerList: %v, KVList: %v, MessageFetch: %v",
+		timeoutConfig.ConnectionTimeout,
+		timeoutConfig.StreamListTimeout,
+		timeoutConfig.ConsumerListTimeout,
+		timeoutConfig.KVListTimeout,
+		timeoutConfig.MessageFetchTimeout,
+	)
+
 	// Init connection store (JSON file at ~/.nats-ui/connections.json)
 	connStore, err := store.NewConnectionStore()
 	if err != nil {
 		log.Fatalf("failed to init connection store: %v", err)
 	}
 
-	// Init NATS bridge
-	bridge := natsBridge.NewBridge()
+	// Init NATS bridge with timeout configuration
+	bridge := natsBridge.NewBridge(timeoutConfig)
 
 	// Init HTTP server
 	app := fiber.New(fiber.Config{

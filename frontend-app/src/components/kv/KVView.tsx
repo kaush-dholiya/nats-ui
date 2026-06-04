@@ -257,7 +257,39 @@ function KVBucketDetail({ bucket, onClose, onDelete }: { bucket: string; onClose
       </div>
 
       <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
-        {entries.length === 0 ? (
+        {loading ? (
+          <>
+            <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr 120px', gap: '0', borderBottom: '1px solid var(--border)', padding: '0 16px', position: 'sticky', top: 0, background: 'var(--bg-surface)', zIndex: 10 }}>
+              <div style={{ padding: '12px 0', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Key</div>
+              <div style={{ padding: '12px 12px', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Value</div>
+              <div style={{ padding: '12px 0', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', textAlign: 'center' }}>Action</div>
+            </div>
+            <div style={{ flex: 1, overflow: 'auto' }}>
+              {[...Array(8)].map((_, i) => (
+                <div key={i} style={{
+                  display: 'grid', gridTemplateColumns: '300px 1fr 120px', gap: '0',
+                  borderBottom: '1px solid var(--border-subtle)',
+                  background: i % 2 === 0 ? 'transparent' : 'rgba(59,130,246,0.02)',
+                  padding: '12px 16px', alignItems: 'center',
+                  opacity: 0.5,
+                }}>
+                  <div style={{
+                    height: '12px', background: 'var(--border)', borderRadius: '3px',
+                    width: '120px', animation: 'pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                  }} />
+                  <div style={{
+                    height: '12px', background: 'var(--border)', borderRadius: '3px',
+                    width: '60%', marginLeft: '12px', animation: 'pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                  }} />
+                  <div style={{
+                    height: '12px', background: 'var(--border)', borderRadius: '3px',
+                    width: '40px', marginLeft: 'auto', animation: 'pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                  }} />
+                </div>
+              ))}
+            </div>
+          </>
+        ) : entries.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-dim)' }}>
             <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{search ? 'No entries match' : 'No entries in bucket'}</p>
           </div>
