@@ -548,7 +548,73 @@ func sendWS(c *websocket.Conn, msg models.WSMessage) error {
 
 // Stream Management Methods
 
-func (b *Bridge) CreateStream(connectionID, streamName string, subjects []string) error {
+func streamConfigFromRequest(req models.StreamConfigRequest) *gonats.StreamConfig {
+	cfg := &gonats.StreamConfig{
+		Name:                 req.Name,
+		Subjects:             req.Subjects,
+		Description:          req.Description,
+		Replicas:             req.Replicas,
+		MaxBytes:             req.MaxBytes,
+		MaxMsgs:              req.MaxMsgs,
+		MaxMsgSize:           req.MaxMsgSize,
+		MaxMsgsPerSubject:    req.MaxMsgsPerSubject,
+		MaxConsumers:         req.MaxConsumers,
+		DiscardNewPerSubject: req.DiscardNewPerSubject,
+		NoAck:                req.NoAck,
+		AllowRollup:          req.AllowRollup,
+		AllowDirect:          req.AllowDirect,
+		MirrorDirect:         req.MirrorDirect,
+		DenyDelete:           req.DenyDelete,
+		DenyPurge:            req.DenyPurge,
+		FirstSeq:             req.FirstSeq,
+		Metadata:             req.Metadata,
+	}
+
+	if req.MaxAge > 0 {
+		cfg.MaxAge = time.Duration(req.MaxAge) * time.Second
+	}
+	if req.DuplicateWindow > 0 {
+		cfg.Duplicates = time.Duration(req.DuplicateWindow) * time.Second
+	}
+
+	switch req.Storage {
+	case "memory":
+		cfg.Storage = gonats.MemoryStorage
+	default:
+		cfg.Storage = gonats.FileStorage
+	}
+
+	switch req.Retention {
+	case "workqueue":
+		cfg.Retention = gonats.WorkQueuePolicy
+	case "interest":
+		cfg.Retention = gonats.InterestPolicy
+	default:
+		cfg.Retention = gonats.LimitsPolicy
+	}
+
+	switch req.Discard {
+	case "new":
+		cfg.Discard = gonats.DiscardNew
+	default:
+		cfg.Discard = gonats.DiscardOld
+	}
+
+	switch req.Compression {
+	case "s2":
+		cfg.Compression = gonats.S2Compression
+	default:
+		cfg.Compression = gonats.NoCompression
+	}
+
+	if cfg.Replicas <= 0 {
+		cfg.Replicas = 1
+	}
+
+	return cfg
+}
+
+func (b *Bridge) CreateStream(connectionID string, req models.StreamConfigRequest) error {
 	b.mu.RLock()
 	ac, ok := b.connections[connectionID]
 	b.mu.RUnlock()
@@ -561,11 +627,92 @@ func (b *Bridge) CreateStream(connectionID, streamName string, subjects []string
 		return fmt.Errorf("JetStream not available")
 	}
 
-	_, err := ac.JS.AddStream(&gonats.StreamConfig{
-		Name:     streamName,
-		Subjects: subjects,
-	})
+	cfg := streamConfigFromRequest(req)
+	_, err := ac.JS.AddStream(cfg)
 	return err
+}
+
+func (b *Bridge) GetStreamInfo(connectionID, streamName string) (*models.StreamFullConfig, error) {
+	b.mu.RLock()
+	ac, ok := b.connections[connectionID]
+	b.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	if ac.JS == nil {
+		return nil, fmt.Errorf("JetStream not available")
+	}
+
+	si, err := ac.JS.StreamInfo(streamName)
+	if err != nil {
+		return nil, fmt.Errorf("stream not found: %w", err)
+	}
+
+	cfg := si.Config
+	result := &models.StreamFullConfig{
+		Name:                 cfg.Name,
+		Subjects:             cfg.Subjects,
+		Description:          cfg.Description,
+		Replicas:             cfg.Replicas,
+		MaxBytes:             cfg.MaxBytes,
+		MaxMsgs:              cfg.MaxMsgs,
+		MaxMsgSize:           cfg.MaxMsgSize,
+		MaxMsgsPerSubject:    cfg.MaxMsgsPerSubject,
+		MaxConsumers:         cfg.MaxConsumers,
+		DiscardNewPerSubject: cfg.DiscardNewPerSubject,
+		NoAck:                cfg.NoAck,
+		AllowRollup:          cfg.AllowRollup,
+		AllowDirect:          cfg.AllowDirect,
+		MirrorDirect:         cfg.MirrorDirect,
+		DenyDelete:           cfg.DenyDelete,
+		DenyPurge:            cfg.DenyPurge,
+		FirstSeq:             cfg.FirstSeq,
+		Metadata:             cfg.Metadata,
+		Messages:             si.State.Msgs,
+		Bytes:                si.State.Bytes,
+		Consumers:            si.State.Consumers,
+	}
+
+	if cfg.MaxAge > 0 {
+		result.MaxAge = int64(cfg.MaxAge / time.Second)
+	}
+	if cfg.Duplicates > 0 {
+		result.DuplicateWindow = int64(cfg.Duplicates / time.Second)
+	}
+
+	switch cfg.Storage {
+	case gonats.MemoryStorage:
+		result.Storage = "memory"
+	default:
+		result.Storage = "file"
+	}
+
+	switch cfg.Retention {
+	case gonats.WorkQueuePolicy:
+		result.Retention = "workqueue"
+	case gonats.InterestPolicy:
+		result.Retention = "interest"
+	default:
+		result.Retention = "limits"
+	}
+
+	switch cfg.Discard {
+	case gonats.DiscardNew:
+		result.Discard = "new"
+	default:
+		result.Discard = "old"
+	}
+
+	switch cfg.Compression {
+	case gonats.S2Compression:
+		result.Compression = "s2"
+	default:
+		result.Compression = ""
+	}
+
+	return result, nil
 }
 
 func (b *Bridge) DeleteStream(connectionID, streamName string) error {
@@ -600,7 +747,7 @@ func (b *Bridge) PurgeStream(connectionID, streamName string) error {
 	return ac.JS.PurgeStream(streamName)
 }
 
-func (b *Bridge) EditStream(connectionID, streamName string, subjects []string) error {
+func (b *Bridge) EditStream(connectionID, streamName string, req models.StreamConfigRequest) error {
 	b.mu.RLock()
 	ac, ok := b.connections[connectionID]
 	b.mu.RUnlock()
@@ -618,8 +765,51 @@ func (b *Bridge) EditStream(connectionID, streamName string, subjects []string) 
 		return fmt.Errorf("stream not found: %w", err)
 	}
 
-	si.Config.Subjects = subjects
-	_, err = ac.JS.UpdateStream(&si.Config)
+	// Merge editable fields onto existing config (preserve non-editable fields like Name, Storage, Retention etc.)
+	updated := si.Config
+	updated.Subjects = req.Subjects
+	updated.Description = req.Description
+	updated.Replicas = req.Replicas
+	updated.MaxBytes = req.MaxBytes
+	updated.MaxMsgs = req.MaxMsgs
+	updated.MaxMsgSize = req.MaxMsgSize
+	updated.MaxMsgsPerSubject = req.MaxMsgsPerSubject
+	updated.NoAck = req.NoAck
+	updated.AllowRollup = req.AllowRollup
+	updated.AllowDirect = req.AllowDirect
+	updated.MirrorDirect = req.MirrorDirect
+	updated.DiscardNewPerSubject = req.DiscardNewPerSubject
+	updated.Metadata = req.Metadata
+
+	if req.Replicas <= 0 {
+		updated.Replicas = 1
+	}
+	if req.MaxAge > 0 {
+		updated.MaxAge = time.Duration(req.MaxAge) * time.Second
+	} else {
+		updated.MaxAge = 0
+	}
+	if req.DuplicateWindow > 0 {
+		updated.Duplicates = time.Duration(req.DuplicateWindow) * time.Second
+	} else {
+		updated.Duplicates = 0
+	}
+
+	switch req.Discard {
+	case "new":
+		updated.Discard = gonats.DiscardNew
+	default:
+		updated.Discard = gonats.DiscardOld
+	}
+
+	switch req.Compression {
+	case "s2":
+		updated.Compression = gonats.S2Compression
+	default:
+		updated.Compression = gonats.NoCompression
+	}
+
+	_, err = ac.JS.UpdateStream(&updated)
 	return err
 }
 

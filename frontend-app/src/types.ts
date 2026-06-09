@@ -24,6 +24,42 @@ export interface StreamInfo {
   consumers: number
 }
 
+export interface StreamConfigRequest {
+  name: string
+  subjects: string[]
+  description?: string
+  storage?: string           // "file" | "memory"
+  retention?: string         // "limits" | "workqueue" | "interest"
+  replicas?: number
+  maxAge?: number            // seconds, 0 = no limit
+  maxBytes?: number          // -1 = unlimited
+  maxMsgs?: number           // -1 = unlimited
+  maxMsgSize?: number        // -1 = unlimited
+  maxMsgsPerSubject?: number
+  maxConsumers?: number      // -1 = unlimited
+  discard?: string           // "old" | "new"
+  discardNewPerSubject?: boolean
+  duplicateWindow?: number   // seconds
+  noAck?: boolean
+  allowRollup?: boolean
+  allowDirect?: boolean
+  mirrorDirect?: boolean
+  denyDelete?: boolean
+  denyPurge?: boolean
+  compression?: string       // "" | "s2"
+  firstSeq?: number
+  allowMsgTTL?: boolean
+  allowAtomicPublish?: boolean
+  allowBatchPublish?: boolean
+  metadata?: Record<string, string>
+}
+
+export interface StreamFullConfig extends StreamConfigRequest {
+  messages: number
+  bytes: number
+  consumers: number
+}
+
 export type FilterType = 'contains' | 'exact' | 'regex' | 'jsonpath'
 
 export interface ContentFilter {

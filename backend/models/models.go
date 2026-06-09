@@ -41,6 +41,74 @@ type StreamInfo struct {
 	Consumers int      `json:"consumers"`
 }
 
+// StreamConfigRequest is used for both create and update operations.
+// Duration fields (MaxAge, DuplicateWindow) are in seconds; 0 means disabled/unlimited.
+// Limit fields (MaxBytes, MaxMsgs, MaxMsgSize, MaxConsumers) use -1 for unlimited.
+type StreamConfigRequest struct {
+	Name                 string            `json:"name"`
+	Subjects             []string          `json:"subjects"`
+	Description          string            `json:"description"`
+	Storage              string            `json:"storage"`   // "file" | "memory"
+	Retention            string            `json:"retention"` // "limits" | "workqueue" | "interest"
+	Replicas             int               `json:"replicas"`
+	MaxAge               int64             `json:"maxAge"`     // seconds, 0 = no limit
+	MaxBytes             int64             `json:"maxBytes"`   // -1 = unlimited
+	MaxMsgs              int64             `json:"maxMsgs"`    // -1 = unlimited
+	MaxMsgSize           int32             `json:"maxMsgSize"` // -1 = unlimited
+	MaxMsgsPerSubject    int64             `json:"maxMsgsPerSubject"`
+	MaxConsumers         int               `json:"maxConsumers"` // -1 = unlimited
+	Discard              string            `json:"discard"`      // "old" | "new"
+	DiscardNewPerSubject bool              `json:"discardNewPerSubject"`
+	DuplicateWindow      int64             `json:"duplicateWindow"` // seconds, 0 = default
+	NoAck                bool              `json:"noAck"`
+	AllowRollup          bool              `json:"allowRollup"`
+	AllowDirect          bool              `json:"allowDirect"`
+	MirrorDirect         bool              `json:"mirrorDirect"`
+	DenyDelete           bool              `json:"denyDelete"`
+	DenyPurge            bool              `json:"denyPurge"`
+	Compression          string            `json:"compression"` // "" | "s2"
+	FirstSeq             uint64            `json:"firstSeq"`
+	AllowMsgTTL          bool              `json:"allowMsgTTL"`
+	AllowAtomicPublish   bool              `json:"allowAtomicPublish"`
+	AllowBatchPublish    bool              `json:"allowBatchPublish"`
+	Metadata             map[string]string `json:"metadata"`
+}
+
+// StreamFullConfig is returned by GET /streams/:stream and used to pre-populate the edit form.
+type StreamFullConfig struct {
+	Name                 string            `json:"name"`
+	Subjects             []string          `json:"subjects"`
+	Description          string            `json:"description"`
+	Storage              string            `json:"storage"`
+	Retention            string            `json:"retention"`
+	Replicas             int               `json:"replicas"`
+	MaxAge               int64             `json:"maxAge"`
+	MaxBytes             int64             `json:"maxBytes"`
+	MaxMsgs              int64             `json:"maxMsgs"`
+	MaxMsgSize           int32             `json:"maxMsgSize"`
+	MaxMsgsPerSubject    int64             `json:"maxMsgsPerSubject"`
+	MaxConsumers         int               `json:"maxConsumers"`
+	Discard              string            `json:"discard"`
+	DiscardNewPerSubject bool              `json:"discardNewPerSubject"`
+	DuplicateWindow      int64             `json:"duplicateWindow"`
+	NoAck                bool              `json:"noAck"`
+	AllowRollup          bool              `json:"allowRollup"`
+	AllowDirect          bool              `json:"allowDirect"`
+	MirrorDirect         bool              `json:"mirrorDirect"`
+	DenyDelete           bool              `json:"denyDelete"`
+	DenyPurge            bool              `json:"denyPurge"`
+	Compression          string            `json:"compression"`
+	FirstSeq             uint64            `json:"firstSeq"`
+	AllowMsgTTL          bool              `json:"allowMsgTTL"`
+	AllowAtomicPublish   bool              `json:"allowAtomicPublish"`
+	AllowBatchPublish    bool              `json:"allowBatchPublish"`
+	Metadata             map[string]string `json:"metadata"`
+	// State
+	Messages  uint64 `json:"messages"`
+	Bytes     uint64 `json:"bytes"`
+	Consumers int    `json:"consumers"`
+}
+
 type PaginatedStreams struct {
 	Streams []StreamInfo `json:"streams"`
 	Total   int          `json:"total"`

@@ -1,4 +1,4 @@
-import type { Connection, ServerInfo, StreamInfo, ContentFilter, MessageEnvelope } from '../types'
+import type { Connection, ServerInfo, StreamInfo, StreamConfigRequest, StreamFullConfig, ContentFilter, MessageEnvelope } from '../types'
 
 const BASE = '/api'
 let globalTimeout = 30  // Default timeout in seconds
@@ -95,19 +95,21 @@ export const api = {
     req<void>(`/connections/${id}/kv/${bucket}/${key}`, { method: 'DELETE' }),
   deleteKVBucket: (id: string, bucket: string) =>
     req<void>(`/connections/${id}/kv/${bucket}`, { method: 'DELETE' }),
-  createStream: (id: string, name: string, subjects: string[]) =>
+  createStream: (id: string, config: StreamConfigRequest) =>
     req<void>(`/connections/${id}/streams`, {
       method: 'POST',
-      body: JSON.stringify({ name, subjects }),
+      body: JSON.stringify(config),
     }),
+  getStreamInfo: (id: string, stream: string) =>
+    req<StreamFullConfig>(`/connections/${id}/streams/${stream}`),
   deleteStream: (id: string, stream: string) =>
     req<void>(`/connections/${id}/streams/${stream}`, { method: 'DELETE' }),
   purgeStream: (id: string, stream: string) =>
     req<void>(`/connections/${id}/streams/${stream}/purge`, { method: 'POST' }),
-  editStream: (id: string, stream: string, subjects: string[]) =>
+  editStream: (id: string, stream: string, config: StreamConfigRequest) =>
     req<void>(`/connections/${id}/streams/${stream}`, {
       method: 'PUT',
-      body: JSON.stringify({ subjects }),
+      body: JSON.stringify(config),
     }),
   getStreamMessages: (id: string, stream: string, limit: number, contentFilter?: ContentFilter, startSeq?: number, endSeq?: number, startTime?: number, endTime?: number) =>
     req<MessageEnvelope[]>(`/connections/${id}/streams/${stream}/messages`, {

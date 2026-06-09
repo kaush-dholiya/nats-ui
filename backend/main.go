@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"time"
 
 	"nats-ui/api"
 	"nats-ui/config"
@@ -35,7 +36,10 @@ func main() {
 
 	// Init HTTP server
 	app := fiber.New(fiber.Config{
-		AppName: "NATS UI Backend",
+		AppName:      "NATS UI Backend",
+		ReadTimeout:  120 * time.Second,
+		WriteTimeout: 120 * time.Second,
+		BodyLimit:    50 * 1024 * 1024, // 50 MB
 	})
 
 	app.Use(logger.New())

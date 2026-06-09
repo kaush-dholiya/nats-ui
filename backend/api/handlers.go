@@ -44,6 +44,7 @@ func (h *Handler) RegisterRoutes(app *fiber.App) {
 	api.Delete("/connections/:id/kv/:bucket/:key", h.deleteKVHandler)
 	api.Delete("/connections/:id/kv/:bucket", h.deleteKVBucketHandler)
 	api.Post("/connections/:id/streams", h.createStream)
+	api.Get("/connections/:id/streams/:stream", h.getStreamInfo)
 	api.Delete("/connections/:id/streams/:stream", h.deleteStream)
 	api.Post("/connections/:id/streams/:stream/purge", h.purgeStream)
 	api.Put("/connections/:id/streams/:stream", h.editStream)
@@ -217,17 +218,22 @@ func (h *Handler) publish(c *fiber.Ctx) error {
 
 // Stream management handlers
 func (h *Handler) createStream(c *fiber.Ctx) error {
-	var req struct {
-		Name     string   `json:"name"`
-		Subjects []string `json:"subjects"`
-	}
+	var req models.StreamConfigRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
-	if err := h.bridge.CreateStream(c.Params("id"), req.Name, req.Subjects); err != nil {
+	if err := h.bridge.CreateStream(c.Params("id"), req); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"status": "created"})
+}
+
+func (h *Handler) getStreamInfo(c *fiber.Ctx) error {
+	info, err := h.bridge.GetStreamInfo(c.Params("id"), c.Params("stream"))
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(info)
 }
 
 func (h *Handler) deleteStream(c *fiber.Ctx) error {
@@ -245,13 +251,11 @@ func (h *Handler) purgeStream(c *fiber.Ctx) error {
 }
 
 func (h *Handler) editStream(c *fiber.Ctx) error {
-	var req struct {
-		Subjects []string `json:"subjects"`
-	}
+	var req models.StreamConfigRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
-	if err := h.bridge.EditStream(c.Params("id"), c.Params("stream"), req.Subjects); err != nil {
+	if err := h.bridge.EditStream(c.Params("id"), c.Params("stream"), req); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"status": "updated"})
