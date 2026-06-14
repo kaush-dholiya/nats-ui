@@ -19,6 +19,20 @@ type PublishRequest struct {
 	Headers map[string]string `json:"headers,omitempty"`
 }
 
+type RequestReplyRequest struct {
+	Subject string            `json:"subject"`
+	Payload string            `json:"payload"`
+	Headers map[string]string `json:"headers,omitempty"`
+	Timeout int               `json:"timeout"` // seconds, 0 = default 5s
+}
+
+type RequestReplyResponse struct {
+	Subject string            `json:"subject"`
+	Payload string            `json:"payload"`
+	Headers map[string]string `json:"headers,omitempty"`
+	Elapsed int64             `json:"elapsed"` // milliseconds
+}
+
 type SubscribeRequest struct {
 	Subject       string         `json:"subject"`
 	ContentFilter *ContentFilter `json:"contentFilter,omitempty"`
@@ -34,11 +48,19 @@ type ContentFilter struct {
 }
 
 type StreamInfo struct {
-	Name      string   `json:"name"`
-	Subjects  []string `json:"subjects"`
-	Messages  uint64   `json:"messages"`
-	Bytes     uint64   `json:"bytes"`
-	Consumers int      `json:"consumers"`
+	Name         string   `json:"name"`
+	Subjects     []string `json:"subjects"`
+	Messages     uint64   `json:"messages"`
+	Bytes        uint64   `json:"bytes"`
+	Consumers    int      `json:"consumers"`
+	NumSubjects  uint64   `json:"numSubjects"`
+	Replicas     int      `json:"replicas"`
+	Storage      string   `json:"storage"`      // "file" | "memory"
+	Retention    string   `json:"retention"`    // "limits" | "workqueue" | "interest"
+	MaxMsgs      int64    `json:"maxMsgs"`      // -1 = unlimited
+	MaxBytes     int64    `json:"maxBytes"`     // -1 = unlimited
+	MaxAge       int64    `json:"maxAge"`       // seconds, 0 = unlimited
+	MaxConsumers int      `json:"maxConsumers"` // -1 = unlimited
 }
 
 // StreamConfigRequest is used for both create and update operations.
@@ -122,7 +144,12 @@ type ConsumerInfo struct {
 	DeliverPolicy   string `json:"deliverPolicy"`
 	AckPolicy       string `json:"ackPolicy"`
 	FilterSubject   string `json:"filterSubject"`
-	PendingMessages uint64 `json:"pendingMessages"`
+	PendingMessages uint64 `json:"pendingMessages"` // undelivered messages in stream
+	AckPending      int    `json:"ackPending"`      // delivered but not yet acked (lag)
+	WaitingPulls    int    `json:"waitingPulls"`    // outstanding pull requests (pull consumers)
+	TotalDelivered  uint64 `json:"totalDelivered"`  // total messages delivered to this consumer
+	IsPull          bool   `json:"isPull"`          // true = pull consumer, false = push consumer
+	DeliverSubject  string `json:"deliverSubject"`  // push deliver subject (empty for pull)
 	PausedUntil     string `json:"pausedUntil,omitempty"`
 }
 
@@ -131,6 +158,22 @@ type PaginatedConsumers struct {
 	Total     int            `json:"total"`
 	Offset    int            `json:"offset"`
 	Limit     int            `json:"limit"`
+}
+
+type ReplayRequest struct {
+	TargetSubject string `json:"targetSubject"` // empty = use original subject of each message
+	StartSeq      uint64 `json:"startSeq"`      // 0 = from beginning
+	EndSeq        uint64 `json:"endSeq"`        // 0 = to end
+	StartTime     int64  `json:"startTime"`     // ms epoch, 0 = no filter
+	EndTime       int64  `json:"endTime"`       // ms epoch, 0 = no filter
+	DelayMs       int    `json:"delayMs"`       // ms between messages, 0 = no delay
+	Limit         int    `json:"limit"`         // max messages to replay, 0 = use default (500)
+}
+
+type ReplayResult struct {
+	Replayed int    `json:"replayed"`
+	Skipped  int    `json:"skipped"`
+	Error    string `json:"error,omitempty"`
 }
 
 type MessageEnvelope struct {

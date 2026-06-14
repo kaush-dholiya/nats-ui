@@ -4,7 +4,7 @@ export interface Connection {
   url: string
   username?: string
   password?: string
-  timeout?: number  // API timeout in seconds (0 or undefined = default 30s)
+  timeout?: number
 }
 
 export interface ServerInfo {
@@ -22,31 +22,39 @@ export interface StreamInfo {
   messages: number
   bytes: number
   consumers: number
+  numSubjects: number
+  replicas: number
+  storage: string
+  retention: string
+  maxMsgs: number
+  maxBytes: number
+  maxAge: number
+  maxConsumers: number
 }
 
 export interface StreamConfigRequest {
   name: string
   subjects: string[]
   description?: string
-  storage?: string           // "file" | "memory"
-  retention?: string         // "limits" | "workqueue" | "interest"
+  storage?: string
+  retention?: string
   replicas?: number
-  maxAge?: number            // seconds, 0 = no limit
-  maxBytes?: number          // -1 = unlimited
-  maxMsgs?: number           // -1 = unlimited
-  maxMsgSize?: number        // -1 = unlimited
+  maxAge?: number
+  maxBytes?: number
+  maxMsgs?: number
+  maxMsgSize?: number
   maxMsgsPerSubject?: number
-  maxConsumers?: number      // -1 = unlimited
-  discard?: string           // "old" | "new"
+  maxConsumers?: number
+  discard?: string
   discardNewPerSubject?: boolean
-  duplicateWindow?: number   // seconds
+  duplicateWindow?: number
   noAck?: boolean
   allowRollup?: boolean
   allowDirect?: boolean
   mirrorDirect?: boolean
   denyDelete?: boolean
   denyPurge?: boolean
-  compression?: string       // "" | "s2"
+  compression?: string
   firstSeq?: number
   allowMsgTTL?: boolean
   allowAtomicPublish?: boolean
@@ -64,7 +72,7 @@ export type FilterType = 'contains' | 'exact' | 'regex' | 'jsonpath'
 
 export interface ContentFilter {
   type: FilterType
-  field: string      // dot-notation JSON path e.g. "user.address.city", empty = raw
+  field: string
   value: string
   negate: boolean
   caseSensitive: boolean

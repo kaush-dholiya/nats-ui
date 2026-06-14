@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { Radio, Play, Square, Trash2, Filter, X, ChevronDown, ChevronRight, Info, AlertTriangle } from 'lucide-react'
+import { Radio, Play, Square, Trash2, Filter, X, ChevronDown, ChevronRight, Info, AlertTriangle, RotateCcw, CheckCircle2 } from 'lucide-react'
 import { useStore } from '../../stores/appStore'
+import { api } from '../../lib/api'
 import { createSubscription, type SubscriptionHandle } from '../../lib/ws'
 import type { MessageEnvelope, ContentFilter, FilterType } from '../../types'
 
@@ -373,9 +374,10 @@ function ContentFilterPanel({ filter, setFilter, onClose, disabled }: {
   )
 }
 
-function MessageRow({ msg, expanded, onToggle }: {
-  msg: MessageEnvelope; expanded: boolean; onToggle: () => void
+function MessageRow({ msg, connectionId, expanded, onToggle }: {
+  msg: MessageEnvelope; connectionId?: string; expanded: boolean; onToggle: () => void
 }) {
+  const [republishState, setRepublishState] = useState<'idle' | 'success' | 'error'>('idle')
   const dt = new Date(msg.timestamp)
   const dateStr = dt.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })
   const timeStr = dt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
@@ -386,6 +388,19 @@ function MessageRow({ msg, expanded, onToggle }: {
     prettyPayload = JSON.stringify(JSON.parse(msg.payload), null, 2)
     isJson = true
   } catch { }
+
+  const handleRepublish = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!connectionId) return
+    try {
+      await api.publish(connectionId, msg.subject, msg.payload, Object.keys(msg.headers || {}).length ? msg.headers : undefined)
+      setRepublishState('success')
+      setTimeout(() => setRepublishState('idle'), 2000)
+    } catch {
+      setRepublishState('error')
+      setTimeout(() => setRepublishState('idle'), 2000)
+    }
+  }
 
   return (
     <div style={{
@@ -438,6 +453,30 @@ function MessageRow({ msg, expanded, onToggle }: {
               ))}
             </div>
           )}
+          <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              onClick={handleRepublish}
+              disabled={!connectionId || republishState !== 'idle'}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '5px',
+                padding: '5px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 500,
+                border: '1px solid var(--border)', cursor: connectionId ? 'pointer' : 'not-allowed',
+                fontFamily: 'var(--font-sans)', transition: 'all 0.15s',
+                background: republishState === 'success' ? 'rgba(16,185,129,0.1)' : republishState === 'error' ? 'rgba(239,68,68,0.1)' : 'var(--bg-elevated)',
+                color: republishState === 'success' ? 'var(--green)' : republishState === 'error' ? 'var(--red)' : 'var(--text-secondary)',
+                borderColor: republishState === 'success' ? 'rgba(16,185,129,0.3)' : republishState === 'error' ? 'rgba(239,68,68,0.3)' : 'var(--border)',
+              }}
+            >
+              {republishState === 'success'
+                ? <><CheckCircle2 size={12} /> Re-published</>
+                : republishState === 'error'
+                  ? <><X size={12} /> Failed</>
+                  : <><RotateCcw size={12} /> Re-publish</>}
+            </button>
+            <span style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
+              → <span style={{ fontFamily: 'var(--font-mono)' }}>{msg.subject}</span>
+            </span>
+          </div>
         </div>
       )}
     </div>

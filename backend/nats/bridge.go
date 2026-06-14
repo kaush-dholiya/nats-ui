@@ -129,11 +129,19 @@ func (b *Bridge) GetStreams(connectionID string) ([]models.StreamInfo, error) {
 		result := make([]models.StreamInfo, 0)
 		for info := range ac.JS.Streams() {
 			si := models.StreamInfo{
-				Name:      info.Config.Name,
-				Subjects:  info.Config.Subjects,
-				Messages:  info.State.Msgs,
-				Bytes:     info.State.Bytes,
-				Consumers: info.State.Consumers,
+				Name:         info.Config.Name,
+				Subjects:     info.Config.Subjects,
+				Messages:     info.State.Msgs,
+				Bytes:        info.State.Bytes,
+				Consumers:    info.State.Consumers,
+				NumSubjects:  info.State.NumSubjects,
+				Replicas:     info.Config.Replicas,
+				Storage:      fmt.Sprintf("%v", info.Config.Storage),
+				Retention:    fmt.Sprintf("%v", info.Config.Retention),
+				MaxMsgs:      info.Config.MaxMsgs,
+				MaxBytes:     info.Config.MaxBytes,
+				MaxAge:       int64(info.Config.MaxAge.Seconds()),
+				MaxConsumers: info.Config.MaxConsumers,
 			}
 			result = append(result, si)
 		}
@@ -189,11 +197,19 @@ func (b *Bridge) GetStreamsPaginated(connectionID string, offset, limit int, sea
 			}
 
 			si := models.StreamInfo{
-				Name:      info.Config.Name,
-				Subjects:  info.Config.Subjects,
-				Messages:  info.State.Msgs,
-				Bytes:     info.State.Bytes,
-				Consumers: info.State.Consumers,
+				Name:         info.Config.Name,
+				Subjects:     info.Config.Subjects,
+				Messages:     info.State.Msgs,
+				Bytes:        info.State.Bytes,
+				Consumers:    info.State.Consumers,
+				NumSubjects:  info.State.NumSubjects,
+				Replicas:     info.Config.Replicas,
+				Storage:      fmt.Sprintf("%v", info.Config.Storage),
+				Retention:    fmt.Sprintf("%v", info.Config.Retention),
+				MaxMsgs:      info.Config.MaxMsgs,
+				MaxBytes:     info.Config.MaxBytes,
+				MaxAge:       int64(info.Config.MaxAge.Seconds()),
+				MaxConsumers: info.Config.MaxConsumers,
 			}
 			allStreams = append(allStreams, si)
 		}
@@ -289,6 +305,11 @@ func (b *Bridge) GetConsumersPaginated(connectionID string, offset, limit int, s
 					AckPolicy:       fmt.Sprintf("%v", consumerInfo.Config.AckPolicy),
 					FilterSubject:   consumerInfo.Config.FilterSubject,
 					PendingMessages: consumerInfo.NumPending,
+					AckPending:      consumerInfo.NumAckPending,
+					WaitingPulls:    consumerInfo.NumWaiting,
+					TotalDelivered:  consumerInfo.Delivered.Consumer,
+					IsPull:          consumerInfo.Config.DeliverSubject == "",
+					DeliverSubject:  consumerInfo.Config.DeliverSubject,
 				}
 				allConsumers = append(allConsumers, consumer)
 			}
@@ -454,6 +475,116 @@ func (b *Bridge) GetStreamMessages(connectionID, streamName string, limit int, f
 	return results, nil
 }
 
+func (b *Bridge) ReplayStreamMessages(connectionID, streamName string, req models.ReplayRequest) (*models.ReplayResult, error) {
+	b.mu.RLock()
+	ac, ok := b.connections[connectionID]
+	b.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("not connected")
+	}
+	if ac.JS == nil {
+		return nil, fmt.Errorf("JetStream not available")
+	}
+
+	limit := req.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+
+	si, err := ac.JS.StreamInfo(streamName)
+	if err != nil {
+		return nil, fmt.Errorf("stream not found: %w", err)
+	}
+	if si.State.Msgs == 0 {
+		return &models.ReplayResult{}, nil
+	}
+
+	startSeq := req.StartSeq
+	if startSeq == 0 {
+		if req.StartTime > 0 {
+			startSeq = si.State.FirstSeq
+		} else {
+			startSeq = si.State.FirstSeq
+		}
+	}
+
+	subject := ">"
+	if len(si.Config.Subjects) > 0 {
+		subject = si.Config.Subjects[0]
+	}
+
+	sub, err := ac.JS.SubscribeSync(
+		subject,
+		gonats.BindStream(streamName),
+		gonats.StartSequence(startSeq),
+		gonats.OrderedConsumer(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create consumer: %w", err)
+	}
+	defer sub.Unsubscribe()
+
+	result := &models.ReplayResult{}
+	deadline := time.Now().Add(b.timeoutConfig.MessageFetchTimeout)
+
+	for result.Replayed+result.Skipped < limit && time.Now().Before(deadline) {
+		msg, err := sub.NextMsg(500 * time.Millisecond)
+		if err != nil {
+			break
+		}
+
+		meta, _ := msg.Metadata()
+		var seq uint64
+		var ts int64
+		if meta != nil {
+			seq = meta.Sequence.Stream
+			ts = meta.Timestamp.UnixMilli()
+		}
+
+		// Sequence bounds
+		if req.EndSeq > 0 && seq > req.EndSeq {
+			break
+		}
+		if req.StartSeq > 0 && seq < req.StartSeq {
+			result.Skipped++
+			continue
+		}
+		// Time bounds
+		if req.StartTime > 0 && ts < req.StartTime {
+			result.Skipped++
+			continue
+		}
+		if req.EndTime > 0 && ts > req.EndTime {
+			result.Skipped++
+			continue
+		}
+
+		dest := msg.Subject
+		if req.TargetSubject != "" {
+			dest = req.TargetSubject
+		}
+
+		pub := &gonats.Msg{Subject: dest, Data: msg.Data}
+		if len(msg.Header) > 0 {
+			pub.Header = make(gonats.Header)
+			for k, v := range msg.Header {
+				pub.Header[k] = append([]string(nil), v...)
+			}
+		}
+		if err := ac.NC.PublishMsg(pub); err != nil {
+			result.Error = err.Error()
+			break
+		}
+
+		result.Replayed++
+		if req.DelayMs > 0 {
+			time.Sleep(time.Duration(req.DelayMs) * time.Millisecond)
+		}
+	}
+
+	return result, nil
+}
+
 func (b *Bridge) Publish(connectionID string, req models.PublishRequest) error {
 	b.mu.RLock()
 	ac, ok := b.connections[connectionID]
@@ -476,6 +607,52 @@ func (b *Bridge) Publish(connectionID string, req models.PublishRequest) error {
 	}
 
 	return ac.NC.PublishMsg(msg)
+}
+
+func (b *Bridge) Request(connectionID string, req models.RequestReplyRequest) (*models.RequestReplyResponse, error) {
+	b.mu.RLock()
+	ac, ok := b.connections[connectionID]
+	b.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	timeout := time.Duration(req.Timeout) * time.Second
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
+	msg := &gonats.Msg{
+		Subject: req.Subject,
+		Data:    []byte(req.Payload),
+	}
+	if len(req.Headers) > 0 {
+		msg.Header = make(gonats.Header)
+		for k, v := range req.Headers {
+			msg.Header.Set(k, v)
+		}
+	}
+
+	start := time.Now()
+	reply, err := ac.NC.RequestMsg(msg, timeout)
+	if err != nil {
+		return nil, err
+	}
+	elapsed := time.Since(start).Milliseconds()
+
+	resp := &models.RequestReplyResponse{
+		Subject: reply.Subject,
+		Payload: string(reply.Data),
+		Elapsed: elapsed,
+	}
+	if len(reply.Header) > 0 {
+		resp.Headers = make(map[string]string)
+		for k := range reply.Header {
+			resp.Headers[k] = reply.Header.Get(k)
+		}
+	}
+	return resp, nil
 }
 
 // HandleSubscribeWS streams live messages to a WebSocket connection with content filtering
@@ -834,6 +1011,11 @@ func (b *Bridge) GetConsumers(connectionID, streamName string) ([]models.Consume
 			AckPolicy:       fmt.Sprintf("%v", ci.Config.AckPolicy),
 			FilterSubject:   ci.Config.FilterSubject,
 			PendingMessages: ci.NumPending,
+			AckPending:      ci.NumAckPending,
+			WaitingPulls:    ci.NumWaiting,
+			TotalDelivered:  ci.Delivered.Consumer,
+			IsPull:          ci.Config.DeliverSubject == "",
+			DeliverSubject:  ci.Config.DeliverSubject,
 		})
 	}
 	return consumers, nil

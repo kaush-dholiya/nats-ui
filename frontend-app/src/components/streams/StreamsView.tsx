@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import {
-  Layers, Users, HardDrive, MessageSquare,
+  Layers, MessageSquare,
   ChevronRight, RefreshCw, Search, X,
   Radio, Send, Filter, ChevronDown, Play, Loader2,
-  Trash2, Zap
+  Trash2, Zap, RotateCcw, CheckCircle2
 } from 'lucide-react'
 import { useStore } from '../../stores/appStore'
 import { api } from '../../lib/api'
@@ -87,220 +87,289 @@ export function StreamsView() {
   const totalPages = Math.ceil(total / limit)
 
   return (
-    <div className="animate-fade-in" style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
-      {/* Stream list panel */}
-      <div style={{
-        width: selected ? '300px' : '100%',
-        flexShrink: 0,
-        borderRight: selected ? '1px solid var(--border)' : 'none',
-        display: 'flex', flexDirection: 'column',
-        overflow: 'hidden',
-        transition: 'width 0.2s',
-      }}>
-        <div style={{ padding: '28px 20px 14px', flexShrink: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
+    <div className="animate-fade-in" style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {!selected ? (
+        /* ── Full-width grid ── */
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+          {/* Header */}
+          <div style={{ padding: '24px 28px 14px', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
-              <h1 style={{ fontSize: '20px', fontWeight: 600, letterSpacing: '-0.3px' }}>Streams</h1>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '12px', marginTop: '3px' }}>
-                {total} total {total !== 1 ? 'streams' : 'stream'}{search ? ` • Page ${currentPage}/${totalPages}` : ''}
+              <h1 style={{ fontSize: '22px', fontWeight: 600, letterSpacing: '-0.3px' }}>Streams</h1>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '4px' }}>
+                {total} {total !== 1 ? 'streams' : 'stream'}{totalPages > 1 ? ` • page ${currentPage}/${totalPages}` : ''}
               </p>
             </div>
-            <button onClick={() => loadPaginatedStreams(search, offset)} style={{
-              background: 'var(--bg-elevated)', border: '1px solid var(--border)',
-              borderRadius: '7px', padding: '7px', cursor: 'pointer', color: 'var(--text-secondary)',
-              display: 'flex', alignItems: 'center',
-            }}>
-              <RefreshCw size={13} style={{ animation: loading ? 'spin 0.8s linear infinite' : 'none' }} />
-            </button>
-          </div>
-          <div style={{ position: 'relative' }}>
-            <Search size={13} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
-            <input value={search} onChange={e => handleSearch(e.target.value)}
-              placeholder="Search streams by name…"
-              style={{
-                width: '100%', padding: '8px 10px 8px 30px',
-                background: 'var(--bg-elevated)', border: '1px solid var(--border)',
-                borderRadius: '7px', color: 'var(--text-primary)', fontSize: '12px',
-                fontFamily: 'var(--font-sans)', outline: 'none',
-              }} />
-          </div>
-        </div>
-
-        <div style={{ flex: 1, overflow: 'auto', padding: '0 10px 10px', display: 'flex', flexDirection: 'column' }}>
-          {streams.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-dim)' }}>
-              <Layers size={28} style={{ margin: '0 auto 12px', opacity: 0.3 }} />
-              <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                {search ? 'No streams match your search' : 'No JetStream streams found'}
-              </p>
-            </div>
-          ) : (
-            <>
-              <div style={{ flex: 1, overflow: 'auto' }}>
-                {streams.map(stream => (
-                  <StreamRow
-                    key={stream.name}
-                    stream={stream}
-                    selected={selected?.name === stream.name}
-                    onClick={() => setSelected(selected?.name === stream.name ? null : stream)}
-                    connectionId={session?.connectionId || ''}
-                  />
-                ))}
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <div style={{ position: 'relative' }}>
+                <Search size={13} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
+                <input value={search} onChange={e => handleSearch(e.target.value)}
+                  placeholder="Search streams…"
+                  style={{
+                    padding: '7px 10px 7px 30px', width: '220px',
+                    background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+                    borderRadius: '7px', color: 'var(--text-primary)', fontSize: '12px',
+                    fontFamily: 'var(--font-sans)', outline: 'none',
+                  }} />
               </div>
-              {totalPages > 1 && (
-                <div style={{ padding: '12px 10px 0', borderTop: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-dim)' }}>
-                  <div>
-                    Showing {offset + 1}–{Math.min(offset + limit, total)} of {total}
-                  </div>
-                  <div style={{ display: 'flex', gap: '6px' }}>
-                    <button
-                      onClick={handlePrevPage}
-                      disabled={offset === 0}
-                      style={{
-                        padding: '4px 8px', borderRadius: '5px',
-                        background: offset === 0 ? 'var(--bg-surface)' : 'var(--bg-elevated)',
-                        border: '1px solid var(--border)', cursor: offset === 0 ? 'not-allowed' : 'pointer',
-                        color: offset === 0 ? 'var(--text-dim)' : 'var(--text-secondary)', fontSize: '11px',
-                        opacity: offset === 0 ? 0.5 : 1,
-                      }}
-                    >
-                      ← Prev
-                    </button>
-                    <button
-                      onClick={handleNextPage}
-                      disabled={offset + limit >= total}
-                      style={{
-                        padding: '4px 8px', borderRadius: '5px',
-                        background: offset + limit >= total ? 'var(--bg-surface)' : 'var(--bg-elevated)',
-                        border: '1px solid var(--border)', cursor: offset + limit >= total ? 'not-allowed' : 'pointer',
-                        color: offset + limit >= total ? 'var(--text-dim)' : 'var(--text-secondary)', fontSize: '11px',
-                        opacity: offset + limit >= total ? 0.5 : 1,
-                      }}
-                    >
-                      Next →
-                    </button>
-                  </div>
-                </div>
-              )}
-            </>
+              <button onClick={() => loadPaginatedStreams(search, offset)} style={{
+                background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+                borderRadius: '7px', padding: '7px', cursor: 'pointer', color: 'var(--text-secondary)',
+                display: 'flex', alignItems: 'center',
+              }}>
+                <RefreshCw size={13} style={{ animation: loading ? 'spin 0.8s linear infinite' : 'none' }} />
+              </button>
+            </div>
+          </div>
+
+          {/* Grid */}
+          <div style={{ flex: 1, overflow: 'auto', padding: '0 28px 20px' }}>
+            {loading && streams.length === 0 ? (
+              <StreamGridSkeleton />
+            ) : streams.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '80px 20px', color: 'var(--text-dim)' }}>
+                <Layers size={32} style={{ margin: '0 auto 14px', opacity: 0.25 }} />
+                <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>
+                  {search ? 'No streams match your search' : 'No JetStream streams found'}
+                </p>
+              </div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                <thead>
+                  <tr>
+                    {['Stream', 'Subjects', 'Storage', 'Replicas', 'Messages', 'Size', 'Consumers', 'Limits', ''].map(h => (
+                      <ColHead key={h} label={h} />
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {streams.map(stream => (
+                    <StreamGridRow
+                      key={stream.name}
+                      stream={stream}
+                      connectionId={session?.connectionId || ''}
+                      onSelect={() => setSelected(stream)}
+                      onDeleted={() => loadPaginatedStreams(search, offset)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div style={{ padding: '10px 28px', borderTop: '1px solid var(--border-subtle)', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-dim)' }}>
+              <span>Showing {offset + 1}–{Math.min(offset + limit, total)} of {total}</span>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <PageBtn label="← Prev" disabled={offset === 0} onClick={handlePrevPage} />
+                <PageBtn label="Next →" disabled={offset + limit >= total} onClick={handleNextPage} />
+              </div>
+            </div>
           )}
         </div>
-      </div>
-
-      {/* Detail panel */}
-      {selected && session && (
-        <div style={{ flex: 1, overflow: 'auto' }} className="animate-fade-in">
-          <StreamDetail
-            stream={selected}
-            connectionId={session.connectionId}
-            onClose={() => setSelected(null)}
-          />
+      ) : (
+        /* ── Detail panel (slide in) ── */
+        <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }} className="animate-fade-in">
+          {session && (
+            <StreamDetail
+              stream={selected}
+              connectionId={session.connectionId}
+              onClose={() => setSelected(null)}
+            />
+          )}
         </div>
       )}
     </div>
   )
 }
 
-function StreamRow({ stream, selected, onClick, connectionId }: { stream: StreamInfo; selected: boolean; onClick: () => void; connectionId: string }) {
-  const [showActions, setShowActions] = useState(false)
+// ── Grid helpers ──────────────────────────────────────────────────────────────
+
+function ColHead({ label }: { label: string }) {
+  return (
+    <th style={{
+      padding: '8px 12px', textAlign: 'center', fontSize: '10px', fontWeight: 700,
+      color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.6px',
+      borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap',
+    }}>{label}</th>
+  )
+}
+
+function PageBtn({ label, disabled, onClick }: { label: string; disabled: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      padding: '4px 10px', borderRadius: '5px', fontSize: '11px',
+      background: disabled ? 'var(--bg-surface)' : 'var(--bg-elevated)',
+      border: '1px solid var(--border)', cursor: disabled ? 'not-allowed' : 'pointer',
+      color: disabled ? 'var(--text-dim)' : 'var(--text-secondary)',
+      opacity: disabled ? 0.5 : 1,
+    }}>{label}</button>
+  )
+}
+
+function StreamGridSkeleton() {
+  return (
+    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+      <tbody>
+        {[...Array(6)].map((_, i) => (
+          <tr key={i} style={{ borderBottom: '1px solid var(--border-subtle)', opacity: 0.5 }}>
+            {[...Array(9)].map((_, j) => (
+              <td key={j} style={{ padding: '14px 12px' }}>
+                <div style={{ height: '12px', background: 'var(--border)', borderRadius: '3px', width: j === 0 ? '120px' : '60px', animation: 'pulse 1.5s ease infinite' }} />
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function StreamGridRow({ stream, connectionId, onSelect, onDeleted }: {
+  stream: StreamInfo; connectionId: string;
+  onSelect: () => void; onDeleted: () => void;
+}) {
+  const [hover, setHover] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState('')
 
   const handleDelete = async (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (confirm(`Delete stream "${stream.name}"? This cannot be undone.`)) {
-      try {
-        await api.deleteStream(connectionId, stream.name)
-        window.location.reload()
-      } catch (err: any) {
-        alert(`Error: ${err.message}`)
-      }
+    if (!confirmDelete) { setConfirmDelete(true); return }
+    setDeleting(true)
+    try {
+      await api.deleteStream(connectionId, stream.name)
+      onDeleted()
+    } catch (err: any) {
+      setError(err.message)
+      setDeleting(false)
+      setConfirmDelete(false)
     }
   }
 
   const handlePurge = async (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (confirm(`Purge all messages from "${stream.name}"? This cannot be undone.`)) {
-      try {
-        await api.purgeStream(connectionId, stream.name)
-        window.location.reload()
-      } catch (err: any) {
-        alert(`Error: ${err.message}`)
-      }
+    if (confirm(`Purge all messages from "${stream.name}"?`)) {
+      try { await api.purgeStream(connectionId, stream.name); onDeleted() }
+      catch (err: any) { alert(err.message) }
     }
   }
 
-  return (
-    <div
-      onClick={onClick}
-      onMouseEnter={() => setShowActions(true)}
-      onMouseLeave={() => setShowActions(false)}
-      style={{
-        padding: '11px 12px', borderRadius: '8px', cursor: 'pointer', marginBottom: '3px',
-        background: selected ? 'var(--accent-glow)' : 'transparent',
-        border: `1px solid ${selected ? 'rgba(59,130,246,0.25)' : 'transparent'}`,
-        transition: 'all 0.12s', position: 'relative',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '9px', minWidth: 0 }}>
-          <div style={{
-            width: '30px', height: '30px', borderRadius: '6px', flexShrink: 0,
-            background: selected ? 'rgba(59,130,246,0.15)' : 'var(--bg-overlay)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}>
-            <Layers size={13} color={selected ? 'var(--accent)' : 'var(--text-dim)'} />
-          </div>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: '13px', fontWeight: 500, fontFamily: 'var(--font-mono)', color: selected ? 'var(--accent)' : 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {stream.name}
-            </div>
-            <div style={{ fontSize: '11px', color: 'var(--text-dim)', marginTop: '1px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {(stream.subjects ?? []).join(', ') || 'no subjects'}
-            </div>
-          </div>
-        </div>
-        {showActions ? (
-          <div style={{ display: 'flex', gap: '4px' }} onClick={e => e.stopPropagation()}>
-            <button
-              onClick={handlePurge}
-              style={{
-                background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.3)',
-                color: 'var(--amber)', borderRadius: '5px', padding: '4px 8px', cursor: 'pointer',
-                display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px',
-              }}
-              title="Purge all messages"
-            >
-              <Zap size={12} /> Purge
-            </button>
-            <button
-              onClick={handleDelete}
-              style={{
-                background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.3)',
-                color: 'var(--red)', borderRadius: '5px', padding: '4px 8px', cursor: 'pointer',
-                display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px',
-              }}
-              title="Delete stream"
-            >
-              <Trash2 size={12} /> Delete
-            </button>
-          </div>
-        ) : (
-          <ChevronRight size={12} color={selected ? 'var(--accent)' : 'var(--text-dim)'} style={{ flexShrink: 0 }} />
-        )}
-      </div>
-      <div style={{ display: 'flex', gap: '12px', marginTop: '8px', paddingLeft: '39px' }}>
-        <MiniStat icon={MessageSquare} label={stream.messages.toLocaleString()} />
-        <MiniStat icon={HardDrive} label={bytes(stream.bytes)} />
-        <MiniStat icon={Users} label={`${stream.consumers}`} />
-      </div>
-    </div>
-  )
-}
+  const storageBg = stream.storage === '0' || stream.storage?.toLowerCase().includes('file') ? 'rgba(59,130,246,0.12)' : 'rgba(16,185,129,0.12)'
+  const storageColor = stream.storage === '0' || stream.storage?.toLowerCase().includes('file') ? 'var(--accent)' : 'var(--green)'
+  const storageLabel = stream.storage === '0' || stream.storage?.toLowerCase().includes('file') ? 'File' : 'Memory'
 
-function MiniStat({ icon: Icon, label }: { icon: any; label: string }) {
+  const retentionLabel = (() => {
+    const r = String(stream.retention)
+    if (r === '0' || r.toLowerCase().includes('limit')) return 'Limits'
+    if (r.toLowerCase().includes('work')) return 'WorkQueue'
+    if (r.toLowerCase().includes('interest')) return 'Interest'
+    return r || 'Limits'
+  })()
+
+  const limitsText: string[] = []
+  if (stream.maxMsgs && stream.maxMsgs !== -1) limitsText.push(`${stream.maxMsgs.toLocaleString()} msgs`)
+  if (stream.maxBytes && stream.maxBytes !== -1) limitsText.push(bytes(stream.maxBytes))
+  if (stream.maxAge && stream.maxAge !== 0) {
+    const s = stream.maxAge
+    limitsText.push(s < 60 ? `${s}s` : s < 3600 ? `${(s/60).toFixed(0)}m` : s < 86400 ? `${(s/3600).toFixed(0)}h` : `${(s/86400).toFixed(0)}d`)
+  }
+
   return (
-    <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: 'var(--text-dim)' }}>
-      <Icon size={10} /> {label}
-    </span>
+    <>
+      <tr
+        onClick={onSelect}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => { setHover(false); setConfirmDelete(false) }}
+        style={{
+          borderBottom: '1px solid var(--border-subtle)',
+          background: hover ? 'var(--bg-elevated)' : 'transparent',
+          cursor: 'pointer', transition: 'background 0.1s',
+        }}
+      >
+        {/* Stream name */}
+        <td style={{ padding: '12px 12px', textAlign: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ width: '26px', height: '26px', borderRadius: '6px', background: 'var(--bg-overlay)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <Layers size={12} color="var(--accent)" />
+            </div>
+            <div>
+              <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 500, color: 'var(--text-primary)', fontSize: '12px' }}>{stream.name}</div>
+              <div style={{ fontSize: '10px', color: 'var(--text-dim)', marginTop: '1px' }}>{retentionLabel}</div>
+            </div>
+          </div>
+        </td>
+        {/* Subjects */}
+        <td style={{ padding: '12px 12px', textAlign: 'center', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', fontSize: '11px', maxWidth: '180px' }}>
+          <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {(stream.subjects ?? []).length === 0
+              ? <span style={{ color: 'var(--text-dim)', fontStyle: 'italic' }}>none</span>
+              : stream.subjects.join(', ')}
+          </div>
+          {stream.numSubjects > 0 && (
+            <div style={{ fontSize: '10px', color: 'var(--text-dim)', marginTop: '1px' }}>{stream.numSubjects} unique</div>
+          )}
+        </td>
+        {/* Storage */}
+        <td style={{ padding: '12px 12px', textAlign: 'center' }}>
+          <span style={{ fontSize: '10px', fontWeight: 600, padding: '2px 7px', borderRadius: '4px', background: storageBg, color: storageColor }}>
+            {storageLabel}
+          </span>
+        </td>
+        {/* Replicas */}
+        <td style={{ padding: '12px 12px', textAlign: 'center', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', fontSize: '12px' }}>
+          {stream.replicas || 1}
+        </td>
+        {/* Messages */}
+        <td style={{ padding: '12px 12px', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', fontSize: '12px', textAlign: 'center' }}>
+          {stream.messages.toLocaleString()}
+        </td>
+        {/* Size */}
+        <td style={{ padding: '12px 12px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', fontSize: '12px', textAlign: 'center' }}>
+          {bytes(stream.bytes)}
+        </td>
+        {/* Active consumers */}
+        <td style={{ padding: '12px 12px', textAlign: 'center', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', fontSize: '12px' }}>
+          {stream.consumers}
+        </td>
+        {/* Limits */}
+        <td style={{ padding: '12px 12px', textAlign: 'center', fontSize: '11px', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+          {limitsText.length > 0
+            ? limitsText.join(' / ')
+            : <span style={{ color: 'var(--text-dim)' }}>∞</span>}
+        </td>
+        {/* Actions */}
+        <td style={{ padding: '12px 10px', textAlign: 'center', whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
+          {hover && (
+            <div style={{ display: 'flex', gap: '4px', justifyContent: 'flex-end' }}>
+              <button onClick={handlePurge} style={{
+                display: 'flex', alignItems: 'center', gap: '3px',
+                padding: '3px 8px', borderRadius: '4px', fontSize: '11px', cursor: 'pointer',
+                background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.3)', color: 'var(--amber)',
+              }}>
+                <Zap size={11} /> Purge
+              </button>
+              <button onClick={handleDelete} disabled={deleting} style={{
+                display: 'flex', alignItems: 'center', gap: '3px',
+                padding: '3px 8px', borderRadius: '4px', fontSize: '11px', cursor: 'pointer',
+                background: confirmDelete ? 'rgba(239,68,68,0.2)' : 'rgba(239,68,68,0.1)',
+                border: `1px solid ${confirmDelete ? 'rgba(239,68,68,0.5)' : 'rgba(239,68,68,0.25)'}`,
+                color: 'var(--red)',
+              }}>
+                <Trash2 size={11} />
+                {deleting ? 'Deleting…' : confirmDelete ? 'Confirm' : 'Delete'}
+              </button>
+            </div>
+          )}
+        </td>
+      </tr>
+      {error && (
+        <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+          <td colSpan={9} style={{ padding: '6px 12px', color: 'var(--red)', fontSize: '11px', background: 'rgba(239,68,68,0.06)' }}>{error}</td>
+        </tr>
+      )}
+    </>
   )
 }
 
@@ -445,6 +514,8 @@ function StreamDetail({ stream, connectionId, onClose }: {
             onFetch={fetchMessages}
             expandedIdx={expandedIdx}
             setExpandedIdx={setExpandedIdx}
+            connectionId={connectionId}
+            streamName={stream.name}
           />
         ) : (
           <InfoTab stream={stream} />
@@ -456,7 +527,8 @@ function StreamDetail({ stream, connectionId, onClose }: {
 
 function MessagesTab({ messages, loading, error, limit, setLimit, showFilter, setShowFilter,
   filter, setFilter, filterEnabled, setFilterEnabled, startSeq, setStartSeq, endSeq, setEndSeq,
-  startTime, setStartTime, endTime, setEndTime, onFetch, expandedIdx, setExpandedIdx }: any) {
+  startTime, setStartTime, endTime, setEndTime, onFetch, expandedIdx, setExpandedIdx, connectionId, streamName }: any) {
+  const [showReplay, setShowReplay] = useState(false)
   return (
     <div>
       {/* Controls */}
@@ -541,7 +613,29 @@ function MessagesTab({ messages, loading, error, limit, setLimit, showFilter, se
           {loading ? <Loader2 size={12} style={{ animation: 'spin 0.8s linear infinite' }} /> : <Play size={12} fill="currentColor" />}
           {loading ? 'Loading…' : 'Fetch'}
         </button>
+
+        <button onClick={() => setShowReplay(r => !r)} style={{
+          display: 'flex', alignItems: 'center', gap: '5px',
+          padding: '6px 11px', borderRadius: '6px',
+          background: showReplay ? 'rgba(139,92,246,0.12)' : 'var(--bg-elevated)',
+          border: `1px solid ${showReplay ? 'rgba(139,92,246,0.35)' : 'var(--border)'}`,
+          color: showReplay ? '#a78bfa' : 'var(--text-secondary)',
+          cursor: 'pointer', fontSize: '12px', fontFamily: 'var(--font-sans)',
+        }}>
+          <RotateCcw size={12} /> Replay
+        </button>
       </div>
+
+      {showReplay && (
+        <ReplayPanel
+          connectionId={connectionId}
+          streamName={streamName}
+          startSeq={startSeq}
+          endSeq={endSeq}
+          startTime={startTime}
+          endTime={endTime}
+        />
+      )}
 
       {/* Filter panel */}
       {showFilter && (
@@ -625,7 +719,7 @@ function MessagesTab({ messages, loading, error, limit, setLimit, showFilter, se
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
           {messages.map((msg: MessageEnvelope, idx: number) => (
-            <MessageRow key={idx} msg={msg} expanded={expandedIdx === idx} onToggle={() => setExpandedIdx(expandedIdx === idx ? null : idx)} />
+            <MessageRow key={idx} msg={msg} connectionId={connectionId} expanded={expandedIdx === idx} onToggle={() => setExpandedIdx(expandedIdx === idx ? null : idx)} />
           ))}
         </div>
       )}
@@ -654,7 +748,8 @@ function InfoRow({ label, value, mono }: { label: string; value: string; mono?: 
   )
 }
 
-function MessageRow({ msg, expanded, onToggle }: { msg: MessageEnvelope; expanded: boolean; onToggle: () => void }) {
+function MessageRow({ msg, connectionId, expanded, onToggle }: { msg: MessageEnvelope; connectionId?: string; expanded: boolean; onToggle: () => void }) {
+  const [republishState, setRepublishState] = useState<'idle' | 'success' | 'error'>('idle')
   const dt = new Date(msg.timestamp)
   const dateStr = dt.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })
   const timeStr = dt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
@@ -662,6 +757,19 @@ function MessageRow({ msg, expanded, onToggle }: { msg: MessageEnvelope; expande
   let isJson = false
   let prettyPayload = msg.payload
   try { prettyPayload = JSON.stringify(JSON.parse(msg.payload), null, 2); isJson = true } catch { }
+
+  const handleRepublish = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!connectionId) return
+    try {
+      await api.publish(connectionId, msg.subject, msg.payload, Object.keys(msg.headers || {}).length ? msg.headers : undefined)
+      setRepublishState('success')
+      setTimeout(() => setRepublishState('idle'), 2000)
+    } catch {
+      setRepublishState('error')
+      setTimeout(() => setRepublishState('idle'), 2000)
+    }
+  }
 
   return (
     <div style={{
@@ -687,7 +795,7 @@ function MessageRow({ msg, expanded, onToggle }: { msg: MessageEnvelope; expande
         </span>
         {msg.matchPath && (
           <span style={{ fontSize: '10px', color: 'var(--amber)', background: 'rgba(245,158,11,0.1)', padding: '1px 6px', borderRadius: '3px', flexShrink: 0, fontFamily: 'var(--font-mono)' }}>
-            ✓ {msg.matchPath}
+            {"\u2713"} {msg.matchPath}
           </span>
         )}
         {expanded ? <ChevronDown size={11} color="var(--text-dim)" /> : <ChevronRight size={11} color="var(--text-dim)" />}
@@ -700,8 +808,163 @@ function MessageRow({ msg, expanded, onToggle }: { msg: MessageEnvelope; expande
             fontFamily: 'var(--font-mono)', color: isJson ? 'var(--green)' : 'var(--text-primary)',
             overflow: 'auto', maxHeight: '260px', margin: 0, lineHeight: 1.6,
           }}>{prettyPayload}</pre>
+          <div style={{ marginTop: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              onClick={handleRepublish}
+              disabled={!connectionId || republishState !== 'idle'}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '5px',
+                padding: '4px 10px', borderRadius: '5px', fontSize: '11px', fontWeight: 500,
+                border: '1px solid var(--border)', cursor: connectionId ? 'pointer' : 'not-allowed',
+                fontFamily: 'var(--font-sans)', transition: 'all 0.15s',
+                background: republishState === 'success' ? 'rgba(16,185,129,0.1)' : republishState === 'error' ? 'rgba(239,68,68,0.1)' : 'var(--bg-elevated)',
+                color: republishState === 'success' ? 'var(--green)' : republishState === 'error' ? 'var(--red)' : 'var(--text-secondary)',
+                borderColor: republishState === 'success' ? 'rgba(16,185,129,0.3)' : republishState === 'error' ? 'rgba(239,68,68,0.3)' : 'var(--border)',
+              }}
+            >
+              {republishState === 'success'
+                ? <><CheckCircle2 size={11} /> Re-published</>
+                : republishState === 'error'
+                  ? <><X size={11} /> Failed</>
+                  : <><RotateCcw size={11} /> Re-publish</>}
+            </button>
+            <span style={{ fontSize: '10px', color: 'var(--text-dim)' }}>
+              {"\u2192"} <span style={{ fontFamily: 'var(--font-mono)' }}>{msg.subject}</span>
+            </span>
+          </div>
         </div>
       )}
+    </div>
+  )
+}
+
+function ReplayPanel({ connectionId, streamName, startSeq, endSeq, startTime, endTime }: {
+  connectionId: string; streamName: string;
+  startSeq: string; endSeq: string; startTime: string; endTime: string;
+}) {
+  const [targetSubject, setTargetSubject] = useState('')
+  const [delayMs, setDelayMs] = useState(0)
+  const [limit, setLimit] = useState(500)
+  const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle')
+  const [result, setResult] = useState<{ replayed: number; skipped: number; error?: string } | null>(null)
+
+  const handleReplay = async () => {
+    setStatus('running')
+    setResult(null)
+    try {
+      const opts: any = { delayMs, limit }
+      if (targetSubject.trim()) opts.targetSubject = targetSubject.trim()
+      if (startSeq) opts.startSeq = parseInt(startSeq, 10)
+      if (endSeq) opts.endSeq = parseInt(endSeq, 10)
+      if (startTime) opts.startTime = new Date(startTime).getTime()
+      if (endTime) opts.endTime = new Date(endTime).getTime()
+      const r = await api.replayStreamMessages(connectionId, streamName, opts)
+      setResult(r)
+      setStatus(r.error ? 'error' : 'done')
+    } catch (e: any) {
+      setResult({ replayed: 0, skipped: 0, error: e.message })
+      setStatus('error')
+    }
+  }
+
+  return (
+    <div className="animate-fade-in" style={{
+      background: 'var(--bg-surface)', border: '1px solid rgba(139,92,246,0.25)',
+      borderRadius: '8px', padding: '14px 16px', marginBottom: '12px',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '7px', marginBottom: '12px' }}>
+        <RotateCcw size={13} color="#a78bfa" />
+        <span style={{ fontSize: '12px', fontWeight: 600, color: '#a78bfa' }}>Replay Messages</span>
+        <span style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
+          {"—"} re-publishes the fetched range back to NATS
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <div>
+          <label style={{ display: 'block', fontSize: '10px', color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>
+            Target Subject
+          </label>
+          <input
+            value={targetSubject}
+            onChange={e => setTargetSubject(e.target.value)}
+            placeholder="original subject"
+            style={{
+              padding: '6px 10px', width: '200px',
+              background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+              borderRadius: '6px', color: 'var(--text-primary)', fontSize: '12px',
+              fontFamily: 'var(--font-mono)', outline: 'none',
+            }}
+          />
+        </div>
+
+        <div>
+          <label style={{ display: 'block', fontSize: '10px', color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>
+            Delay (ms)
+          </label>
+          <input
+            type="number" min={0} max={10000} value={delayMs}
+            onChange={e => setDelayMs(Math.max(0, parseInt(e.target.value) || 0))}
+            style={{
+              padding: '6px 10px', width: '90px', textAlign: 'center',
+              background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+              borderRadius: '6px', color: 'var(--text-primary)', fontSize: '12px',
+              fontFamily: 'var(--font-mono)', outline: 'none',
+            }}
+          />
+        </div>
+
+        <div>
+          <label style={{ display: 'block', fontSize: '10px', color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>
+            Max Messages
+          </label>
+          <select value={limit} onChange={e => setLimit(Number(e.target.value))} style={{
+            padding: '6px 10px', background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+            borderRadius: '6px', color: 'var(--text-primary)', fontSize: '12px',
+            fontFamily: 'var(--font-sans)', cursor: 'pointer', outline: 'none',
+          }}>
+            {[50, 100, 200, 500].map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+
+        <button
+          onClick={handleReplay}
+          disabled={!connectionId || status === 'running'}
+          style={{
+            display: 'flex', alignItems: 'center', gap: '6px',
+            padding: '7px 16px', borderRadius: '6px', fontSize: '12px', fontWeight: 500,
+            background: status === 'running' ? 'rgba(139,92,246,0.08)' : 'rgba(139,92,246,0.15)',
+            border: '1px solid rgba(139,92,246,0.4)', color: '#a78bfa',
+            cursor: status === 'running' ? 'not-allowed' : 'pointer',
+            fontFamily: 'var(--font-sans)', transition: 'all 0.15s',
+          }}
+        >
+          {status === 'running'
+            ? <><Loader2 size={12} style={{ animation: 'spin 0.8s linear infinite' }} /> Replaying{"…"}</>
+            : <><RotateCcw size={12} /> Run Replay</>}
+        </button>
+      </div>
+
+      {result && (
+        <div style={{
+          marginTop: '10px', padding: '8px 12px', borderRadius: '6px', fontSize: '12px',
+          background: status === 'error' ? 'rgba(239,68,68,0.08)' : 'rgba(16,185,129,0.08)',
+          border: `1px solid ${status === 'error' ? 'rgba(239,68,68,0.25)' : 'rgba(16,185,129,0.25)'}`,
+          color: status === 'error' ? 'var(--red)' : 'var(--green)',
+          display: 'flex', alignItems: 'center', gap: '8px',
+        }}>
+          {status === 'error'
+            ? <>{result.error}</>
+            : <><CheckCircle2 size={13} /> Replayed <strong>{result.replayed}</strong> message{result.replayed !== 1 ? 's' : ''}
+              {result.skipped > 0 && <span style={{ color: 'var(--text-dim)' }}> ({result.skipped} skipped)</span>}
+              {targetSubject.trim() && <span style={{ color: 'var(--text-dim)' }}> {"→"} <span style={{ fontFamily: 'var(--font-mono)', color: '#a78bfa' }}>{targetSubject.trim()}</span></span>}
+            </>}
+        </div>
+      )}
+
+      <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--text-dim)', lineHeight: 1.5 }}>
+        Range is taken from the seq / time filters above. Leave <em>Target Subject</em> empty to replay each message to its original subject.
+      </div>
     </div>
   )
 }

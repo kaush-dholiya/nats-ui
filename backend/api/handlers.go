@@ -54,7 +54,9 @@ func (h *Handler) RegisterRoutes(app *fiber.App) {
 	api.Post("/connections/:id/streams/:stream/consumers/:consumer/pause", h.pauseConsumer)
 	api.Post("/connections/:id/streams/:stream/consumers/:consumer/resume", h.resumeConsumer)
 	api.Post("/connections/:id/streams/:stream/messages", h.getStreamMessages)
+	api.Post("/connections/:id/streams/:stream/replay", h.replayStreamMessages)
 	api.Post("/connections/:id/publish", h.publish)
+	api.Post("/connections/:id/request", h.requestReply)
 
 	// WebSocket — must have upgrade middleware first, then the handler
 	app.Use("/ws", func(c *fiber.Ctx) error {
@@ -214,6 +216,30 @@ func (h *Handler) publish(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"status": "published"})
+}
+
+func (h *Handler) replayStreamMessages(c *fiber.Ctx) error {
+	var req models.ReplayRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	result, err := h.bridge.ReplayStreamMessages(c.Params("id"), c.Params("stream"), req)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(result)
+}
+
+func (h *Handler) requestReply(c *fiber.Ctx) error {
+	var req models.RequestReplyRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	}
+	resp, err := h.bridge.Request(c.Params("id"), req)
+	if err != nil {
+		return c.Status(504).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(resp)
 }
 
 // Stream management handlers
