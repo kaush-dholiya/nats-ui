@@ -230,3 +230,41 @@ type PaginatedKVEntries struct {
 	Offset  int       `json:"offset"`
 	Limit   int       `json:"limit"`
 }
+
+// ConnectionStats mirrors nats.go's Statistics — raw I/O counters for the active connection.
+type ConnectionStats struct {
+	InMsgs     uint64 `json:"inMsgs"`
+	OutMsgs    uint64 `json:"outMsgs"`
+	InBytes    uint64 `json:"inBytes"`
+	OutBytes   uint64 `json:"outBytes"`
+	Reconnects uint64 `json:"reconnects"`
+}
+
+// JetStreamHealth summarizes account-level JetStream resource usage vs configured limits.
+// Limit fields are -1 when the account has no limit configured.
+type JetStreamHealth struct {
+	Memory         uint64 `json:"memory"`
+	MemoryLimit    int64  `json:"memoryLimit"`
+	Store          uint64 `json:"store"`
+	StoreLimit     int64  `json:"storeLimit"`
+	Streams        int    `json:"streams"`
+	StreamsLimit   int    `json:"streamsLimit"`
+	Consumers      int    `json:"consumers"`
+	ConsumersLimit int    `json:"consumersLimit"`
+	APITotal       uint64 `json:"apiTotal"`
+	APIErrors      uint64 `json:"apiErrors"`
+}
+
+// SlowConsumer flags a consumer that looks stalled or backed up, for the observability view.
+type SlowConsumer struct {
+	ConsumerInfo
+	Reason string `json:"reason"` // why it was flagged, e.g. "high ack-pending"
+}
+
+// HealthInfo is the payload for GET /connections/:id/health — powers the Dashboard's
+// observability section (connection stats, JetStream account health, slow consumers).
+type HealthInfo struct {
+	Connection    ConnectionStats  `json:"connection"`
+	JetStream     *JetStreamHealth `json:"jetstream,omitempty"`
+	SlowConsumers []SlowConsumer   `json:"slowConsumers"`
+}

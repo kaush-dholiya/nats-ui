@@ -1,4 +1,4 @@
-import type { Connection, ServerInfo, StreamInfo, StreamConfigRequest, StreamFullConfig, ContentFilter, MessageEnvelope } from '../types'
+import type { Connection, ServerInfo, StreamInfo, StreamConfigRequest, StreamFullConfig, ContentFilter, MessageEnvelope, HealthInfo } from '../types'
 
 const BASE = '/api'
 let globalTimeout = 30
@@ -45,6 +45,8 @@ export const api = {
     req<void>(`/connections/${id}/disconnect`, { method: 'POST' }),
   getStatus: (id: string) =>
     req<{ connected: boolean }>(`/connections/${id}/status`),
+  getHealth: (id: string) =>
+    req<HealthInfo>(`/connections/${id}/health`),
 
   // Streams
   getStreams: (id: string) => req<StreamInfo[]>(`/connections/${id}/streams`),

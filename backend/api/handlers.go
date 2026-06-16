@@ -33,6 +33,7 @@ func (h *Handler) RegisterRoutes(app *fiber.App) {
 	api.Post("/connections/:id/connect", h.connect)
 	api.Post("/connections/:id/disconnect", h.disconnect)
 	api.Get("/connections/:id/status", h.status)
+	api.Get("/connections/:id/health", h.getHealth)
 
 	// NATS operations
 	api.Get("/connections/:id/streams", h.getStreamsHandler)
@@ -124,6 +125,14 @@ func (h *Handler) disconnect(c *fiber.Ctx) error {
 func (h *Handler) status(c *fiber.Ctx) error {
 	connected := h.bridge.IsConnected(c.Params("id"))
 	return c.JSON(fiber.Map{"connected": connected})
+}
+
+func (h *Handler) getHealth(c *fiber.Ctx) error {
+	health, err := h.bridge.GetHealth(c.Params("id"))
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(health)
 }
 
 func (h *Handler) getStreamsHandler(c *fiber.Ctx) error {

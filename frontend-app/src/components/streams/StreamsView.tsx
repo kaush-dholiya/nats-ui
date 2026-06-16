@@ -3,10 +3,11 @@ import {
   Layers, MessageSquare,
   ChevronRight, RefreshCw, Search, X,
   Radio, Send, Filter, ChevronDown, Play, Loader2,
-  Trash2, Zap, RotateCcw, CheckCircle2
+  Trash2, Zap, RotateCcw, CheckCircle2, Download
 } from 'lucide-react'
 import { useStore } from '../../stores/appStore'
 import { api } from '../../lib/api'
+import { exportMessages } from '../../lib/exportMessages'
 import type { StreamInfo, MessageEnvelope, ContentFilter, FilterType } from '../../types'
 
 function bytes(n: number) {
@@ -624,6 +625,8 @@ function MessagesTab({ messages, loading, error, limit, setLimit, showFilter, se
         }}>
           <RotateCcw size={12} /> Replay
         </button>
+
+        <ExportButton messages={messages} filenamePrefix={`${streamName}-messages`} />
       </div>
 
       {showReplay && (
@@ -974,6 +977,56 @@ function StatPill({ label, value }: { label: string; value: string }) {
     <div>
       <div style={{ fontSize: '10px', color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.4px', marginBottom: '2px' }}>{label}</div>
       <div style={{ fontSize: '14px', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{value}</div>
+    </div>
+  )
+}
+
+function ExportButton({ messages, filenamePrefix }: { messages: MessageEnvelope[]; filenamePrefix: string }) {
+  const [open, setOpen] = useState(false)
+  const disabled = !messages || messages.length === 0
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        onClick={() => !disabled && setOpen(o => !o)}
+        disabled={disabled}
+        style={{
+          display: 'flex', alignItems: 'center', gap: '5px',
+          padding: '6px 11px', borderRadius: '6px',
+          background: open ? 'rgba(34,197,94,0.12)' : 'var(--bg-elevated)',
+          border: `1px solid ${open ? 'rgba(34,197,94,0.35)' : 'var(--border)'}`,
+          color: disabled ? 'var(--text-dim)' : (open ? '#4ade80' : 'var(--text-secondary)'),
+          cursor: disabled ? 'not-allowed' : 'pointer', fontSize: '12px', fontFamily: 'var(--font-sans)',
+          opacity: disabled ? 0.5 : 1,
+        }}
+      >
+        <Download size={12} /> Export
+      </button>
+      {open && !disabled && (
+        <div
+          onMouseLeave={() => setOpen(false)}
+          style={{
+            position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 20,
+            background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+            borderRadius: '7px', boxShadow: '0 6px 20px rgba(0,0,0,0.25)',
+            minWidth: '120px', overflow: 'hidden',
+          }}
+        >
+          {(['json', 'csv'] as const).map(fmt => (
+            <div
+              key={fmt}
+              onClick={() => { exportMessages(messages, fmt, filenamePrefix); setOpen(false) }}
+              style={{
+                padding: '8px 12px', fontSize: '12px', color: 'var(--text-primary)',
+                cursor: 'pointer', fontFamily: 'var(--font-sans)',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-surface)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              {fmt.toUpperCase()}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

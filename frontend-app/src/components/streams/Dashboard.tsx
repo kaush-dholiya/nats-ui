@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Layers, HardDrive, Cpu, Zap, Settings } from 'lucide-react'
+import { Layers, HardDrive, Cpu, Zap, Settings, ArrowDownUp, Activity, AlertTriangle } from 'lucide-react'
 import { useStore } from '../../stores/appStore'
 import { StreamAdmin } from './StreamAdmin'
+import { api } from '../../lib/api'
+import type { HealthInfo } from '../../types'
 
 function bytes(n: number) {
   if (n < 1024) return `${n} B`
@@ -13,8 +15,22 @@ export function Dashboard() {
   const { session, streams, loadStreams } = useStore()
   const info = session?.serverInfo
   const [showAdmin, setShowAdmin] = useState(false)
+  const [health, setHealth] = useState<HealthInfo | null>(null)
 
   useEffect(() => { loadStreams() }, [])
+
+  useEffect(() => {
+    if (!session) return
+    let cancelled = false
+    const poll = () => {
+      api.getHealth(session.connectionId)
+        .then(h => { if (!cancelled) setHealth(h) })
+        .catch(() => {})
+    }
+    poll()
+    const interval = setInterval(poll, 5000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [session?.connectionId])
 
   const totalMessages = streams.reduce((a, s) => a + s.messages, 0)
   const totalBytes = streams.reduce((a, s) => a + s.bytes, 0)
@@ -62,46 +78,63 @@ export function Dashboard() {
         <StatCard icon={Cpu} label="Consumers" value={totalConsumers} color="var(--amber)" />
       </div>
 
-      {/* Streams table */}
-      {streams.length > 0 && (
-        <div style={{
-          background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: '12px', overflow: 'hidden',
-        }}>
-          <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Layers size={14} color="var(--accent)" />
-            <span style={{ fontSize: '13px', fontWeight: 500 }}>JetStream Streams</span>
-          </div>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                {['Name', 'Subjects', 'Messages', 'Size', 'Consumers'].map(h => (
-                  <th key={h} style={{
-                    padding: '10px 20px', textAlign: 'left', fontSize: '11px',
-                    color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px',
-                  }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {streams.map((s, i) => (
-                <tr key={s.name} style={{
-                  borderBottom: i < streams.length - 1 ? '1px solid var(--border-subtle)' : 'none',
-                  transition: 'background 0.1s',
-                }}
-                  onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-elevated)'}
-                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-                >
-                  <td style={{ padding: '12px 20px', fontFamily: 'var(--font-mono)', fontSize: '12px', fontWeight: 500 }}>{s.name}</td>
-                  <td style={{ padding: '12px 20px', color: 'var(--text-secondary)', fontSize: '12px', fontFamily: 'var(--font-mono)' }}>
-                    {s.subjects?.join(', ') || '—'}
-                  </td>
-                  <td style={{ padding: '12px 20px', color: 'var(--text-primary)', fontSize: '13px' }}>{s.messages.toLocaleString()}</td>
-                  <td style={{ padding: '12px 20px', color: 'var(--text-secondary)', fontSize: '13px' }}>{bytes(s.bytes)}</td>
-                  <td style={{ padding: '12px 20px', color: 'var(--text-secondary)', fontSize: '13px' }}>{s.consumers}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {/* Observability */}
+      {health && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginBottom: '28px' }}>
+          <Section title="Connection" icon={ArrowDownUp}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: '12px' }}>
+              <Metric label="In Msgs" value={health.connection.inMsgs.toLocaleString()} />
+              <Metric label="Out Msgs" value={health.connection.outMsgs.toLocaleString()} />
+              <Metric label="In Bytes" value={bytes(health.connection.inBytes)} />
+              <Metric label="Out Bytes" value={bytes(health.connection.outBytes)} />
+              <Metric label="Reconnects" value={health.connection.reconnects} warn={health.connection.reconnects > 0} />
+            </div>
+          </Section>
+
+          {health.jetstream && (
+            <Section title="JetStream Health" icon={Activity}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: '12px' }}>
+                <Metric label="Memory" value={`${bytes(health.jetstream.memory)}${health.jetstream.memoryLimit >= 0 ? ` / ${bytes(health.jetstream.memoryLimit)}` : ''}`} />
+                <Metric label="Storage" value={`${bytes(health.jetstream.store)}${health.jetstream.storeLimit >= 0 ? ` / ${bytes(health.jetstream.storeLimit)}` : ''}`} />
+                <Metric label="Streams" value={`${health.jetstream.streams}${health.jetstream.streamsLimit >= 0 ? ` / ${health.jetstream.streamsLimit}` : ''}`} />
+                <Metric label="Consumers" value={`${health.jetstream.consumers}${health.jetstream.consumersLimit >= 0 ? ` / ${health.jetstream.consumersLimit}` : ''}`} />
+                <Metric label="API Calls" value={health.jetstream.apiTotal.toLocaleString()} />
+                <Metric label="API Errors" value={health.jetstream.apiErrors.toLocaleString()} warn={health.jetstream.apiErrors > 0} />
+              </div>
+            </Section>
+          )}
+
+          <Section title="Slow / Stalled Consumers" icon={AlertTriangle}>
+            {health.slowConsumers.length === 0 ? (
+              <div style={{ color: 'var(--text-dim)', fontSize: '12px', padding: '4px 0' }}>No slow consumers detected</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                    {['Consumer', 'Stream', 'Ack Pending', 'Pending Msgs', 'Reason'].map(h => (
+                      <th key={h} style={{
+                        padding: '8px 12px', textAlign: 'left', fontSize: '11px',
+                        color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px',
+                      }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {health.slowConsumers.map((c, i) => (
+                    <tr key={`${c.streamName}-${c.name}`} style={{
+                      borderBottom: i < health.slowConsumers.length - 1 ? '1px solid var(--border-subtle)' : 'none',
+                    }}>
+                      <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', fontSize: '12px', fontWeight: 500 }}>{c.name}</td>
+                      <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-secondary)' }}>{c.streamName}</td>
+                      <td style={{ padding: '8px 12px', fontSize: '12px' }}>{c.ackPending}</td>
+                      <td style={{ padding: '8px 12px', fontSize: '12px' }}>{c.pendingMessages.toLocaleString()}</td>
+                      <td style={{ padding: '8px 12px', fontSize: '12px', color: 'var(--amber)' }}>{c.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Section>
         </div>
       )}
 
@@ -131,6 +164,35 @@ function StatCard({ icon: Icon, label, value, color }: { icon: any; label: strin
         </span>
       </div>
       <div style={{ fontSize: '22px', fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
+        {value}
+      </div>
+    </div>
+  )
+}
+
+function Section({ title, icon: Icon, children }: { title: string; icon: any; children: React.ReactNode }) {
+  return (
+    <div style={{
+      background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: '12px', overflow: 'hidden',
+    }}>
+      <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <Icon size={14} color="var(--accent)" />
+        <span style={{ fontSize: '13px', fontWeight: 500 }}>{title}</span>
+      </div>
+      <div style={{ padding: '16px 20px' }}>
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function Metric({ label, value, warn }: { label: string; value: any; warn?: boolean }) {
+  return (
+    <div>
+      <div style={{ fontSize: '10px', color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>
+        {label}
+      </div>
+      <div style={{ fontSize: '15px', fontWeight: 600, fontFamily: 'var(--font-mono)', color: warn ? 'var(--amber)' : 'var(--text-primary)' }}>
         {value}
       </div>
     </div>

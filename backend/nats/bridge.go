@@ -1347,3 +1347,104 @@ func (b *Bridge) DeleteKVBucket(connectionID, bucketName string) error {
 	// KV buckets are stored as streams with name pattern "KV_<bucket-name>"
 	return ac.JS.DeleteStream("KV_" + bucketName)
 }
+
+// Observability
+
+// Thresholds used to flag a consumer as "slow" in the observability view.
+const (
+	slowConsumerAckPendingThreshold = 100
+	slowConsumerPendingMsgThreshold = 1000
+	slowConsumerMaxResults          = 20
+)
+
+// GetHealth gathers connection-level I/O stats, JetStream account health vs limits,
+// and a list of consumers that look stalled/backed up, for the Dashboard's observability section.
+func (b *Bridge) GetHealth(connectionID string) (*models.HealthInfo, error) {
+	b.mu.RLock()
+	ac, ok := b.connections[connectionID]
+	b.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	stats := ac.NC.Stats()
+	health := &models.HealthInfo{
+		Connection: models.ConnectionStats{
+			InMsgs:     stats.InMsgs,
+			OutMsgs:    stats.OutMsgs,
+			InBytes:    stats.InBytes,
+			OutBytes:   stats.OutBytes,
+			Reconnects: stats.Reconnects,
+		},
+		SlowConsumers: []models.SlowConsumer{},
+	}
+
+	if ac.JS == nil {
+		return health, nil
+	}
+
+	if ai, err := ac.JS.AccountInfo(); err == nil && ai != nil {
+		health.JetStream = &models.JetStreamHealth{
+			Memory:         ai.Memory,
+			MemoryLimit:    ai.Limits.MaxMemory,
+			Store:          ai.Store,
+			StoreLimit:     ai.Limits.MaxStore,
+			Streams:        ai.Streams,
+			StreamsLimit:   ai.Limits.MaxStreams,
+			Consumers:      ai.Consumers,
+			ConsumersLimit: ai.Limits.MaxConsumers,
+			APITotal:       ai.API.Total,
+			APIErrors:      ai.API.Errors,
+		}
+	}
+
+	// Use a channel with timeout to avoid hanging if the cluster is slow to enumerate.
+	done := make(chan []models.SlowConsumer, 1)
+	go func() {
+		slow := make([]models.SlowConsumer, 0)
+		for streamInfo := range ac.JS.Streams() {
+			streamName := streamInfo.Config.Name
+			for ci := range ac.JS.Consumers(streamName) {
+				reason := ""
+				if ci.NumAckPending >= slowConsumerAckPendingThreshold {
+					reason = "high ack-pending"
+				} else if ci.NumPending >= uint64(slowConsumerPendingMsgThreshold) {
+					reason = "high pending messages"
+				} else {
+					continue
+				}
+
+				slow = append(slow, models.SlowConsumer{
+					ConsumerInfo: models.ConsumerInfo{
+						Name:            ci.Name,
+						StreamName:      streamName,
+						DeliverPolicy:   fmt.Sprintf("%v", ci.Config.DeliverPolicy),
+						AckPolicy:       fmt.Sprintf("%v", ci.Config.AckPolicy),
+						FilterSubject:   ci.Config.FilterSubject,
+						PendingMessages: ci.NumPending,
+						AckPending:      ci.NumAckPending,
+						WaitingPulls:    ci.NumWaiting,
+						TotalDelivered:  ci.Delivered.Consumer,
+						IsPull:          ci.Config.DeliverSubject == "",
+						DeliverSubject:  ci.Config.DeliverSubject,
+					},
+					Reason: reason,
+				})
+				if len(slow) >= slowConsumerMaxResults {
+					break
+				}
+			}
+		}
+		done <- slow
+	}()
+
+	select {
+	case slow := <-done:
+		health.SlowConsumers = slow
+	case <-time.After(b.timeoutConfig.ConsumerListTimeout):
+		// Leave SlowConsumers empty rather than failing the whole health check.
+	}
+
+	return health, nil
+}

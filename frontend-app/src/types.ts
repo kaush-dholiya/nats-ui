@@ -100,3 +100,46 @@ export interface ActiveSession {
   serverInfo: ServerInfo
   status: ConnectionStatus
 }
+
+export interface ConnectionStats {
+  inMsgs: number
+  outMsgs: number
+  inBytes: number
+  outBytes: number
+  reconnects: number
+}
+
+export interface JetStreamHealth {
+  memory: number
+  memoryLimit: number
+  store: number
+  storeLimit: number
+  streams: number
+  streamsLimit: number
+  consumers: number
+  consumersLimit: number
+  apiTotal: number
+  apiErrors: number
+}
+
+export interface SlowConsumer {
+  name: string
+  streamName: string
+  pendingMessages: number
+  ackPending: number
+  waitingPulls: number
+  totalDelivered: number
+  deliverPolicy: string
+  ackPolicy: string
+  filterSubject: string
+  isPull: boolean
+  deliverSubject: string
+  pausedUntil?: string
+  reason: string
+}
+
+export interface HealthInfo {
+  connection: ConnectionStats
+  jetstream?: JetStreamHealth
+  slowConsumers: SlowConsumer[]
+}

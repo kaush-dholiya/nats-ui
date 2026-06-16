@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Database, ChevronRight, RefreshCw, Search, ChevronDown, Plus, Trash2, Copy, Check } from 'lucide-react'
+import { Database, RefreshCw, Search, Plus, Trash2, Copy, Check, Layers } from 'lucide-react'
 import { useStore } from '../../stores/appStore'
 import { api } from '../../lib/api'
 
@@ -7,6 +7,13 @@ interface KVBucket {
   name: string
   entries: number
   bytes: number
+}
+
+function bytes(n: number) {
+  if (n < 1024) return `${n} B`
+  if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`
+  return `${(n / 1073741824).toFixed(1)} GB`
 }
 
 export function KVView() {
@@ -20,8 +27,7 @@ export function KVView() {
   const [selectedBucket, setSelectedBucket] = useState<string | null>(null)
   const [showCreateBucket, setShowCreateBucket] = useState(false)
   const [newBucketName, setNewBucketName] = useState('')
-  const [leftPaneWidth, setLeftPaneWidth] = useState(350)
-  const [isDraggingPane, setIsDraggingPane] = useState(false)
+  const [deletingBucket, setDeletingBucket] = useState<string | null>(null)
 
   const loadBuckets = async (searchQuery: string, pageOffset: number) => {
     if (!session?.connectionId) return
@@ -59,11 +65,14 @@ export function KVView() {
 
   const handleDeleteBucket = async (bucket: string) => {
     if (!confirm(`Delete bucket "${bucket}"?`) || !session?.connectionId) return
+    setDeletingBucket(bucket)
     try {
       await api.deleteKVBucket(session.connectionId, bucket)
       loadBuckets(search, offset)
     } catch (err: any) {
       alert(`Error: ${err.message}`)
+    } finally {
+      setDeletingBucket(null)
     }
   }
 
@@ -78,76 +87,94 @@ export function KVView() {
   const buckets = data?.buckets ?? []
   const total = data?.total ?? 0
 
-  const handleMouseDown = () => {
-    setIsDraggingPane(true)
+  if (selectedBucket) {
+    return (
+      <div style={{ height: '100vh', overflow: 'hidden' }}>
+        <KVBucketDetail bucket={selectedBucket} onClose={() => setSelectedBucket(null)} onDelete={handleDeleteBucket} />
+      </div>
+    )
   }
 
-  useEffect(() => {
-    const handleMouseUp = () => setIsDraggingPane(false)
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isDraggingPane || !selectedBucket) return
-      const newWidth = Math.max(250, Math.min(e.clientX, window.innerWidth - 400))
-      setLeftPaneWidth(newWidth)
-    }
-    window.addEventListener('mouseup', handleMouseUp)
-    window.addEventListener('mousemove', handleMouseMove)
-    return () => {
-      window.removeEventListener('mouseup', handleMouseUp)
-      window.removeEventListener('mousemove', handleMouseMove)
-    }
-  }, [isDraggingPane, selectedBucket])
-
   return (
-    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
-      <div style={{ width: selectedBucket ? `${leftPaneWidth}px` : '100%', flexShrink: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', borderRight: selectedBucket ? '1px solid var(--border)' : 'none', transition: isDraggingPane ? 'none' : 'width 0.2s' }}>
-        <div style={{ padding: '28px 20px 14px', flexShrink: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
-            <div>
-              <h1 style={{ fontSize: '20px', fontWeight: 600 }}>KV Store</h1>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '12px', marginTop: '3px' }}>{total} bucket{total !== 1 ? 's' : ''}</p>
-            </div>
-            <button onClick={() => loadBuckets(search, offset)} style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: '7px', padding: '7px', cursor: 'pointer', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center' }}>
-              <RefreshCw size={13} style={{ animation: loading ? 'spin 0.8s linear infinite' : 'none' }} />
-            </button>
-          </div>
-          <div style={{ position: 'relative' }}>
-            <Search size={13} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
-            <input value={search} onChange={e => handleSearch(e.target.value)} placeholder="Search buckets…" style={{ width: '100%', padding: '8px 10px 8px 30px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: '7px', color: 'var(--text-primary)', fontSize: '12px', fontFamily: 'var(--font-sans)', outline: 'none' }} />
-          </div>
-          <button onClick={() => setShowCreateBucket(true)} style={{ width: '100%', marginTop: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', background: 'var(--accent-glow)', color: 'var(--accent)', border: '1px solid rgba(59,130,246,0.3)', borderRadius: '7px', padding: '8px', fontSize: '12px', fontWeight: 500, cursor: 'pointer' }}>
-            <Plus size={13} /> New Bucket
-          </button>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
+      <div style={{
+        padding: '20px 28px 14px', borderBottom: '1px solid var(--border)',
+        display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0,
+      }}>
+        <div style={{ flex: 1 }}>
+          <h1 style={{ fontSize: '20px', fontWeight: 600, letterSpacing: '-0.3px', marginBottom: '2px' }}>KV Store</h1>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '12px' }}>{total} bucket{total !== 1 ? 's' : ''}</p>
         </div>
-
-        <div style={{ flex: 1, overflow: 'auto', padding: '0 10px 10px' }}>
-          {buckets.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-dim)' }}>
-              <Database size={28} style={{ margin: '0 auto 12px', opacity: 0.3 }} />
-              <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{search ? 'No buckets match' : 'No KV buckets found'}</p>
-            </div>
-          ) : (
-            buckets.map(bucket => (
-              <div key={bucket.name} onClick={() => setSelectedBucket(bucket.name)} style={{ padding: '11px 12px', borderRadius: '8px', cursor: 'pointer', marginBottom: '3px', background: selectedBucket === bucket.name ? 'var(--accent-glow)' : 'transparent', border: `1px solid ${selectedBucket === bucket.name ? 'rgba(59,130,246,0.25)' : 'transparent'}`, transition: 'all 0.12s', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }} onMouseEnter={e => !selectedBucket && (e.currentTarget.style.background = 'var(--bg-elevated)')} onMouseLeave={e => !selectedBucket && (e.currentTarget.style.background = 'transparent')}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
-                  <Database size={13} color={selectedBucket === bucket.name ? 'var(--accent)' : 'var(--text-dim)'} />
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: '13px', fontWeight: 500, fontFamily: 'var(--font-mono)', color: selectedBucket === bucket.name ? 'var(--accent)' : 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bucket.name}</div>
-                    <div style={{ fontSize: '11px', color: 'var(--text-dim)', marginTop: '1px' }}>{bucket.entries} entries</div>
-                  </div>
-                </div>
-                {selectedBucket === bucket.name ? <ChevronDown size={12} color="var(--accent)" /> : <ChevronRight size={12} color="var(--text-dim)" />}
-              </div>
-            ))
-          )}
+        <div style={{ position: 'relative', width: '280px' }}>
+          <Search size={12} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
+          <input
+            value={search} onChange={e => handleSearch(e.target.value)}
+            placeholder="Search buckets…"
+            style={{
+              width: '100%', padding: '7px 10px 7px 28px',
+              background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+              borderRadius: '7px', color: 'var(--text-primary)', fontSize: '12px',
+              fontFamily: 'var(--font-sans)', outline: 'none',
+            }}
+          />
         </div>
+        <button onClick={() => setShowCreateBucket(true)} style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--accent-glow)', color: 'var(--accent)', border: '1px solid rgba(59,130,246,0.3)', borderRadius: '7px', padding: '7px 12px', fontSize: '12px', fontWeight: 500, cursor: 'pointer' }}>
+          <Plus size={13} /> New Bucket
+        </button>
+        <button
+          onClick={() => loadBuckets(search, offset)}
+          style={{
+            background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+            borderRadius: '7px', padding: '7px 10px', cursor: 'pointer',
+            color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px',
+          }}
+        >
+          <RefreshCw size={12} style={{ animation: loading ? 'spin 0.8s linear infinite' : 'none' }} />
+          Refresh
+        </button>
       </div>
 
-      {selectedBucket && (
-        <>
-          <div onMouseDown={handleMouseDown} style={{ width: '4px', background: isDraggingPane ? 'var(--accent)' : 'var(--border)', cursor: 'col-resize', flexShrink: 0, transition: isDraggingPane ? 'background 0.2s' : 'none' }} />
-          <KVBucketDetail bucket={selectedBucket} onClose={() => setSelectedBucket(null)} onDelete={handleDeleteBucket} />
-        </>
-      )}
+      <div style={{ flex: 1, overflow: 'auto', padding: '16px 28px 20px' }}>
+        {loading && buckets.length === 0 ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            {[...Array(6)].map((_, i) => (
+              <div key={i} style={{
+                height: '52px', borderRadius: '8px',
+                background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+                animation: 'pulse 1.5s cubic-bezier(0.4,0,0.6,1) infinite',
+                opacity: 1 - i * 0.08,
+              }} />
+            ))}
+          </div>
+        ) : buckets.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '80px 20px', color: 'var(--text-dim)' }}>
+            <Database size={32} style={{ margin: '0 auto 12px', opacity: 0.2 }} />
+            <p style={{ fontSize: '14px', color: 'var(--text-secondary)', fontWeight: 500 }}>{search ? 'No buckets match your search' : 'No KV buckets found'}</p>
+            {!search && <p style={{ fontSize: '12px', marginTop: '6px', color: 'var(--text-dim)' }}>Create a bucket to get started</p>}
+          </div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', padding: '0 14px', marginBottom: '4px' }}>
+              <div style={{ flex: '2 1 200px', fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.4px', color: 'var(--text-dim)', paddingBottom: '6px' }}>Bucket Name</div>
+              <div style={{ flex: '2 1 200px', fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.4px', color: 'var(--text-dim)', paddingBottom: '6px' }}>Stream Name</div>
+              <div style={{ width: '120px', textAlign: 'center', fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.4px', color: 'var(--text-dim)', paddingBottom: '6px' }}>Bucket Size</div>
+              <div style={{ width: '110px', textAlign: 'center', fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.4px', color: 'var(--text-dim)', paddingBottom: '6px' }}>Number of Keys</div>
+              <div style={{ width: '40px', paddingBottom: '6px' }} />
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+              {buckets.map(bucket => (
+                <KVBucketRow
+                  key={bucket.name}
+                  bucket={bucket}
+                  deleting={deletingBucket === bucket.name}
+                  onSelect={() => setSelectedBucket(bucket.name)}
+                  onDelete={() => handleDeleteBucket(bucket.name)}
+                />
+              ))}
+            </div>
+          </>
+        )}
+      </div>
 
       {showCreateBucket && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}>
@@ -424,6 +451,74 @@ function KVEntryRow({ entry, idx, onDelete }: { entry: any; idx: number; onDelet
         >
           <Trash2 size={14} />
           Delete
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function KVBucketRow({ bucket, deleting, onSelect, onDelete }: {
+  bucket: KVBucket; deleting: boolean; onSelect: () => void; onDelete: () => void
+}) {
+  const streamName = `KV_${bucket.name}`
+
+  return (
+    <div
+      onClick={onSelect}
+      style={{
+        display: 'flex', alignItems: 'center', cursor: 'pointer',
+        background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+        borderRadius: '8px', padding: '10px 14px', transition: 'border-color 0.12s',
+      }}
+      onMouseEnter={e => (e.currentTarget.style.borderColor = 'var(--accent)')}
+      onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border)')}
+    >
+      <div style={{ flex: '2 1 200px', minWidth: 0, paddingRight: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <Database size={13} color="var(--text-dim)" style={{ flexShrink: 0 }} />
+        <div style={{
+          fontSize: '13px', fontWeight: 500, fontFamily: 'var(--font-mono)',
+          color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>
+          {bucket.name}
+        </div>
+      </div>
+
+      <div style={{ flex: '2 1 200px', minWidth: 0, paddingRight: '12px' }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '5px',
+          fontSize: '12px', color: 'var(--accent)', fontFamily: 'var(--font-mono)',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>
+          <Layers size={11} style={{ flexShrink: 0 }} />
+          {streamName}
+        </div>
+      </div>
+
+      <div style={{ width: '120px', textAlign: 'center', paddingRight: '8px' }}>
+        <span style={{ fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
+          {bytes(bucket.bytes)}
+        </span>
+      </div>
+
+      <div style={{ width: '110px', textAlign: 'center', paddingRight: '8px' }}>
+        <span style={{ fontSize: '12px', fontFamily: 'var(--font-mono)', color: bucket.entries === 0 ? 'var(--text-dim)' : 'var(--text-primary)' }}>
+          {bucket.entries.toLocaleString()}
+        </span>
+      </div>
+
+      <div style={{ width: '40px', display: 'flex', justifyContent: 'center' }} onClick={e => e.stopPropagation()}>
+        <button
+          onClick={onDelete}
+          disabled={deleting}
+          style={{
+            background: 'none', border: 'none', cursor: deleting ? 'not-allowed' : 'pointer',
+            color: 'var(--text-dim)', padding: '4px', borderRadius: '5px',
+            display: 'flex', alignItems: 'center', opacity: deleting ? 0.4 : 1, transition: 'color 0.12s, background 0.12s',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.color = 'var(--red)'; e.currentTarget.style.background = 'rgba(239,68,68,0.08)' }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-dim)'; e.currentTarget.style.background = 'none' }}
+        >
+          <Trash2 size={13} />
         </button>
       </div>
     </div>
