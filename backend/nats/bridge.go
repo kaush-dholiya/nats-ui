@@ -16,13 +16,42 @@ import (
 	gonats "github.com/nats-io/nats.go"
 )
 
-type ActiveConnection struct {
-	ID   string
-	NC   *gonats.Conn
-	JS   gonats.JetStreamContext
-	mu   sync.Mutex
-	subs map[string]*gonats.Subscription
+// listCache holds a short-lived, per-connection cache of the full stream and
+// consumer lists. Listing streams/consumers against a large deployment (e.g.
+// thousands of streams/consumers) is expensive on the NATS meta-leader, so we
+// avoid re-fetching on every paginated request or every dashboard poll.
+type listCache struct {
+	mu                 sync.Mutex
+	streams            []models.StreamInfo
+	streamsFetchedAt   time.Time
+	consumers          []models.ConsumerInfo
+	consumersFetchedAt time.Time
 }
+
+// invalidate clears the cache so the next read forces a fresh fetch. Called
+// after any mutation (create/delete/update of streams or consumers).
+func (c *listCache) invalidate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.streamsFetchedAt = time.Time{}
+	c.consumersFetchedAt = time.Time{}
+}
+
+type ActiveConnection struct {
+	ID    string
+	NC    *gonats.Conn
+	JS    gonats.JetStreamContext
+	mu    sync.Mutex
+	subs  map[string]*gonats.Subscription
+	cache *listCache
+}
+
+// consumerFetchWorkers bounds how many streams are queried for their
+// consumers concurrently. Fetching sequentially (one CONSUMER.LIST per
+// stream) is the main reason consumer listing times out on deployments with
+// thousands of streams; a bounded worker pool parallelizes this while
+// avoiding hammering the meta-leader with unbounded concurrency.
+const consumerFetchWorkers = 30
 
 type Bridge struct {
 	mu            sync.RWMutex
@@ -59,10 +88,11 @@ func (b *Bridge) Connect(conn models.Connection) (*models.ServerInfo, error) {
 	}
 
 	ac := &ActiveConnection{
-		ID:   conn.ID,
-		NC:   nc,
-		JS:   js,
-		subs: make(map[string]*gonats.Subscription),
+		ID:    conn.ID,
+		NC:    nc,
+		JS:    js,
+		subs:  make(map[string]*gonats.Subscription),
+		cache: &listCache{},
 	}
 
 	b.mu.Lock()
@@ -116,44 +146,173 @@ func (b *Bridge) GetStreams(connectionID string) ([]models.StreamInfo, error) {
 		return nil, fmt.Errorf("not connected")
 	}
 
-	// Always return empty slice, never nil
-	streams := make([]models.StreamInfo, 0)
-
 	if ac.JS == nil {
-		return streams, nil // JetStream not enabled — not an error
+		return make([]models.StreamInfo, 0), nil // JetStream not enabled — not an error
 	}
 
-	// Use a channel with timeout to prevent hanging on slow/broken connections
+	streams, err := b.getAllStreamsCached(ac)
+	if err != nil {
+		return make([]models.StreamInfo, 0), err
+	}
+	return streams, nil
+}
+
+// fetchAllStreams performs the actual (expensive) STREAM.LIST walk against
+// NATS. Callers should generally go through getAllStreamsCached instead.
+func fetchAllStreams(ac *ActiveConnection) []models.StreamInfo {
+	result := make([]models.StreamInfo, 0)
+	for info := range ac.JS.Streams() {
+		result = append(result, models.StreamInfo{
+			Name:         info.Config.Name,
+			Subjects:     info.Config.Subjects,
+			Messages:     info.State.Msgs,
+			Bytes:        info.State.Bytes,
+			Consumers:    info.State.Consumers,
+			NumSubjects:  info.State.NumSubjects,
+			Replicas:     info.Config.Replicas,
+			Storage:      fmt.Sprintf("%v", info.Config.Storage),
+			Retention:    fmt.Sprintf("%v", info.Config.Retention),
+			MaxMsgs:      info.Config.MaxMsgs,
+			MaxBytes:     info.Config.MaxBytes,
+			MaxAge:       int64(info.Config.MaxAge.Seconds()),
+			MaxConsumers: info.Config.MaxConsumers,
+		})
+	}
+	return result
+}
+
+// fetchConsumersForStream performs a single CONSUMER.LIST call for one stream.
+func fetchConsumersForStream(ac *ActiveConnection, streamName string) []models.ConsumerInfo {
+	result := make([]models.ConsumerInfo, 0)
+	for ci := range ac.JS.Consumers(streamName) {
+		result = append(result, models.ConsumerInfo{
+			Name:            ci.Name,
+			StreamName:      streamName,
+			DeliverPolicy:   fmt.Sprintf("%v", ci.Config.DeliverPolicy),
+			AckPolicy:       fmt.Sprintf("%v", ci.Config.AckPolicy),
+			FilterSubject:   ci.Config.FilterSubject,
+			PendingMessages: ci.NumPending,
+			AckPending:      ci.NumAckPending,
+			WaitingPulls:    ci.NumWaiting,
+			TotalDelivered:  ci.Delivered.Consumer,
+			IsPull:          ci.Config.DeliverSubject == "",
+			DeliverSubject:  ci.Config.DeliverSubject,
+		})
+	}
+	return result
+}
+
+// fetchConsumersParallel fetches consumers for many streams concurrently
+// using a bounded worker pool, instead of issuing one CONSUMER.LIST call per
+// stream sequentially. This is the main fix for consumer listing timing out
+// on deployments with thousands of streams: sequentially it's N round trips
+// to the meta-leader, one per stream.
+func fetchConsumersParallel(ac *ActiveConnection, streamNames []string) []models.ConsumerInfo {
+	if len(streamNames) == 0 {
+		return []models.ConsumerInfo{}
+	}
+
+	jobs := make(chan string, len(streamNames))
+	for _, name := range streamNames {
+		jobs <- name
+	}
+	close(jobs)
+
+	workerCount := consumerFetchWorkers
+	if workerCount > len(streamNames) {
+		workerCount = len(streamNames)
+	}
+
+	resultsCh := make(chan []models.ConsumerInfo, workerCount)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			local := make([]models.ConsumerInfo, 0)
+			for streamName := range jobs {
+				local = append(local, fetchConsumersForStream(ac, streamName)...)
+			}
+			resultsCh <- local
+		}()
+	}
+
+	wg.Wait()
+	close(resultsCh)
+
+	all := make([]models.ConsumerInfo, 0, len(streamNames))
+	for r := range resultsCh {
+		all = append(all, r...)
+	}
+	return all
+}
+
+// getAllStreamsCached returns the full stream list, serving from a short-lived
+// cache when possible so repeated/paginated/polled requests don't each pay
+// the cost of a full STREAM.LIST walk.
+func (b *Bridge) getAllStreamsCached(ac *ActiveConnection) ([]models.StreamInfo, error) {
+	ac.cache.mu.Lock()
+	if !ac.cache.streamsFetchedAt.IsZero() && time.Since(ac.cache.streamsFetchedAt) < b.timeoutConfig.ListCacheTTL {
+		streams := ac.cache.streams
+		ac.cache.mu.Unlock()
+		return streams, nil
+	}
+	ac.cache.mu.Unlock()
+
 	done := make(chan []models.StreamInfo, 1)
 	go func() {
-		result := make([]models.StreamInfo, 0)
-		for info := range ac.JS.Streams() {
-			si := models.StreamInfo{
-				Name:         info.Config.Name,
-				Subjects:     info.Config.Subjects,
-				Messages:     info.State.Msgs,
-				Bytes:        info.State.Bytes,
-				Consumers:    info.State.Consumers,
-				NumSubjects:  info.State.NumSubjects,
-				Replicas:     info.Config.Replicas,
-				Storage:      fmt.Sprintf("%v", info.Config.Storage),
-				Retention:    fmt.Sprintf("%v", info.Config.Retention),
-				MaxMsgs:      info.Config.MaxMsgs,
-				MaxBytes:     info.Config.MaxBytes,
-				MaxAge:       int64(info.Config.MaxAge.Seconds()),
-				MaxConsumers: info.Config.MaxConsumers,
-			}
-			result = append(result, si)
-		}
-		done <- result
+		done <- fetchAllStreams(ac)
 	}()
 
-	// Wait for result or timeout
 	select {
 	case result := <-done:
+		ac.cache.mu.Lock()
+		ac.cache.streams = result
+		ac.cache.streamsFetchedAt = time.Now()
+		ac.cache.mu.Unlock()
 		return result, nil
 	case <-time.After(b.timeoutConfig.StreamListTimeout):
-		return streams, fmt.Errorf("stream listing timed out")
+		return nil, fmt.Errorf("stream listing timed out")
+	}
+}
+
+// getAllConsumersCached returns the full consumer list across all streams,
+// serving from a short-lived cache when possible. On a cache miss it fetches
+// consumers for every stream concurrently (see fetchConsumersParallel).
+func (b *Bridge) getAllConsumersCached(ac *ActiveConnection) ([]models.ConsumerInfo, error) {
+	ac.cache.mu.Lock()
+	if !ac.cache.consumersFetchedAt.IsZero() && time.Since(ac.cache.consumersFetchedAt) < b.timeoutConfig.ListCacheTTL {
+		consumers := ac.cache.consumers
+		ac.cache.mu.Unlock()
+		return consumers, nil
+	}
+	ac.cache.mu.Unlock()
+
+	streams, err := b.getAllStreamsCached(ac)
+	if err != nil {
+		return nil, err
+	}
+
+	streamNames := make([]string, len(streams))
+	for i, s := range streams {
+		streamNames[i] = s.Name
+	}
+
+	done := make(chan []models.ConsumerInfo, 1)
+	go func() {
+		done <- fetchConsumersParallel(ac, streamNames)
+	}()
+
+	select {
+	case result := <-done:
+		ac.cache.mu.Lock()
+		ac.cache.consumers = result
+		ac.cache.consumersFetchedAt = time.Now()
+		ac.cache.mu.Unlock()
+		return result, nil
+	case <-time.After(b.timeoutConfig.ConsumerListTimeout):
+		return nil, fmt.Errorf("consumer listing timed out")
 	}
 }
 
@@ -179,73 +338,43 @@ func (b *Bridge) GetStreamsPaginated(connectionID string, offset, limit int, sea
 		limit = 50
 	}
 
+	allStreams, err := b.getAllStreamsCached(ac)
+	if err != nil {
+		return nil, err
+	}
+
 	// Normalize search filter to lowercase for case-insensitive matching
 	searchLower := strings.ToLower(searchFilter)
-
-	// Use a channel with timeout to prevent hanging
-	done := make(chan *models.PaginatedStreams, 1)
-	go func() {
-		allStreams := make([]models.StreamInfo, 0)
-
-		// Fetch all streams and apply filter
-		for info := range ac.JS.Streams() {
-			nameLower := strings.ToLower(info.Config.Name)
-
-			// Apply search filter if provided
-			if searchLower != "" && !strings.Contains(nameLower, searchLower) {
-				continue
+	filtered := allStreams
+	if searchLower != "" {
+		filtered = make([]models.StreamInfo, 0, len(allStreams))
+		for _, si := range allStreams {
+			if strings.Contains(strings.ToLower(si.Name), searchLower) {
+				filtered = append(filtered, si)
 			}
-
-			si := models.StreamInfo{
-				Name:         info.Config.Name,
-				Subjects:     info.Config.Subjects,
-				Messages:     info.State.Msgs,
-				Bytes:        info.State.Bytes,
-				Consumers:    info.State.Consumers,
-				NumSubjects:  info.State.NumSubjects,
-				Replicas:     info.Config.Replicas,
-				Storage:      fmt.Sprintf("%v", info.Config.Storage),
-				Retention:    fmt.Sprintf("%v", info.Config.Retention),
-				MaxMsgs:      info.Config.MaxMsgs,
-				MaxBytes:     info.Config.MaxBytes,
-				MaxAge:       int64(info.Config.MaxAge.Seconds()),
-				MaxConsumers: info.Config.MaxConsumers,
-			}
-			allStreams = append(allStreams, si)
 		}
-
-		// Calculate pagination
-		total := len(allStreams)
-		start := offset
-		end := offset + limit
-
-		if start > total {
-			start = total
-		}
-		if end > total {
-			end = total
-		}
-
-		paginatedStreams := allStreams[start:end]
-		if paginatedStreams == nil {
-			paginatedStreams = []models.StreamInfo{}
-		}
-
-		done <- &models.PaginatedStreams{
-			Streams: paginatedStreams,
-			Total:   total,
-			Offset:  offset,
-			Limit:   limit,
-		}
-	}()
-
-	// Wait for result or timeout
-	select {
-	case result := <-done:
-		return result, nil
-	case <-time.After(b.timeoutConfig.StreamListTimeout):
-		return nil, fmt.Errorf("stream listing timed out")
 	}
+
+	// Calculate pagination
+	total := len(filtered)
+	start := offset
+	end := offset + limit
+
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+
+	paginatedStreams := append([]models.StreamInfo{}, filtered[start:end]...)
+
+	return &models.PaginatedStreams{
+		Streams: paginatedStreams,
+		Total:   total,
+		Offset:  offset,
+		Limit:   limit,
+	}, nil
 }
 
 // GetConsumersPaginated fetches all consumers across all streams with pagination and filtering
@@ -270,83 +399,45 @@ func (b *Bridge) GetConsumersPaginated(connectionID string, offset, limit int, s
 		limit = 50
 	}
 
+	allConsumers, err := b.getAllConsumersCached(ac)
+	if err != nil {
+		return nil, err
+	}
+
 	// Normalize search filter to lowercase for case-insensitive matching
 	searchLower := strings.ToLower(searchFilter)
-
-	// Use a channel with timeout to prevent hanging
-	done := make(chan *models.PaginatedConsumers, 1)
-	go func() {
-		allConsumers := make([]models.ConsumerInfo, 0)
-
-		// Iterate through all streams and their consumers
-		for streamInfo := range ac.JS.Streams() {
-			streamName := streamInfo.Config.Name
-
-			// Iterate through consumers of this stream
-			for consumerInfo := range ac.JS.Consumers(streamName) {
-				// Apply search filter if provided
-				if searchLower != "" {
-					consumerNameLower := strings.ToLower(consumerInfo.Name)
-					streamNameLower := strings.ToLower(streamName)
-					filterSubjectLower := strings.ToLower(consumerInfo.Config.FilterSubject)
-
-					// Check if any of the three fields match
-					if !strings.Contains(consumerNameLower, searchLower) &&
-						!strings.Contains(streamNameLower, searchLower) &&
-						!strings.Contains(filterSubjectLower, searchLower) {
-						continue
-					}
-				}
-
-				consumer := models.ConsumerInfo{
-					Name:            consumerInfo.Name,
-					StreamName:      streamName,
-					DeliverPolicy:   fmt.Sprintf("%v", consumerInfo.Config.DeliverPolicy),
-					AckPolicy:       fmt.Sprintf("%v", consumerInfo.Config.AckPolicy),
-					FilterSubject:   consumerInfo.Config.FilterSubject,
-					PendingMessages: consumerInfo.NumPending,
-					AckPending:      consumerInfo.NumAckPending,
-					WaitingPulls:    consumerInfo.NumWaiting,
-					TotalDelivered:  consumerInfo.Delivered.Consumer,
-					IsPull:          consumerInfo.Config.DeliverSubject == "",
-					DeliverSubject:  consumerInfo.Config.DeliverSubject,
-				}
-				allConsumers = append(allConsumers, consumer)
+	filtered := allConsumers
+	if searchLower != "" {
+		filtered = make([]models.ConsumerInfo, 0, len(allConsumers))
+		for _, ci := range allConsumers {
+			if strings.Contains(strings.ToLower(ci.Name), searchLower) ||
+				strings.Contains(strings.ToLower(ci.StreamName), searchLower) ||
+				strings.Contains(strings.ToLower(ci.FilterSubject), searchLower) {
+				filtered = append(filtered, ci)
 			}
 		}
-
-		// Calculate pagination
-		total := len(allConsumers)
-		start := offset
-		end := offset + limit
-
-		if start > total {
-			start = total
-		}
-		if end > total {
-			end = total
-		}
-
-		paginatedConsumers := allConsumers[start:end]
-		if paginatedConsumers == nil {
-			paginatedConsumers = []models.ConsumerInfo{}
-		}
-
-		done <- &models.PaginatedConsumers{
-			Consumers: paginatedConsumers,
-			Total:     total,
-			Offset:    offset,
-			Limit:     limit,
-		}
-	}()
-
-	// Wait for result or timeout
-	select {
-	case result := <-done:
-		return result, nil
-	case <-time.After(b.timeoutConfig.ConsumerListTimeout):
-		return nil, fmt.Errorf("consumer listing timed out")
 	}
+
+	// Calculate pagination
+	total := len(filtered)
+	start := offset
+	end := offset + limit
+
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+
+	paginatedConsumers := append([]models.ConsumerInfo{}, filtered[start:end]...)
+
+	return &models.PaginatedConsumers{
+		Consumers: paginatedConsumers,
+		Total:     total,
+		Offset:    offset,
+		Limit:     limit,
+	}, nil
 }
 
 // GetStreamMessages fetches stored messages from a JetStream stream (not live subscribe)
@@ -806,6 +897,9 @@ func (b *Bridge) CreateStream(connectionID string, req models.StreamConfigReques
 
 	cfg := streamConfigFromRequest(req)
 	_, err := ac.JS.AddStream(cfg)
+	if err == nil {
+		ac.cache.invalidate()
+	}
 	return err
 }
 
@@ -905,7 +999,11 @@ func (b *Bridge) DeleteStream(connectionID, streamName string) error {
 		return fmt.Errorf("JetStream not available")
 	}
 
-	return ac.JS.DeleteStream(streamName)
+	err := ac.JS.DeleteStream(streamName)
+	if err == nil {
+		ac.cache.invalidate()
+	}
+	return err
 }
 
 func (b *Bridge) PurgeStream(connectionID, streamName string) error {
@@ -987,6 +1085,9 @@ func (b *Bridge) EditStream(connectionID, streamName string, req models.StreamCo
 	}
 
 	_, err = ac.JS.UpdateStream(&updated)
+	if err == nil {
+		ac.cache.invalidate()
+	}
 	return err
 }
 
@@ -1039,6 +1140,9 @@ func (b *Bridge) CreateConsumer(connectionID, streamName, consumerName, filterSu
 		FilterSubject: filterSubject,
 		Durable:       consumerName,
 	})
+	if err == nil {
+		ac.cache.invalidate()
+	}
 	return err
 }
 
@@ -1055,7 +1159,11 @@ func (b *Bridge) DeleteConsumer(connectionID, streamName, consumerName string) e
 		return fmt.Errorf("JetStream not available")
 	}
 
-	return ac.JS.DeleteConsumer(streamName, consumerName)
+	err := ac.JS.DeleteConsumer(streamName, consumerName)
+	if err == nil {
+		ac.cache.invalidate()
+	}
+	return err
 }
 
 func (b *Bridge) PauseConsumer(connectionID, streamName, consumerName string) error {
@@ -1399,52 +1507,35 @@ func (b *Bridge) GetHealth(connectionID string) (*models.HealthInfo, error) {
 		}
 	}
 
-	// Use a channel with timeout to avoid hanging if the cluster is slow to enumerate.
-	done := make(chan []models.SlowConsumer, 1)
-	go func() {
+	// Reuse the cached consumer list (see getAllConsumersCached) instead of
+	// walking every stream's consumers sequentially on every health poll —
+	// that pattern is what made listing time out in the first place on
+	// deployments with thousands of streams/consumers.
+	allConsumers, err := b.getAllConsumersCached(ac)
+	if err == nil {
 		slow := make([]models.SlowConsumer, 0)
-		for streamInfo := range ac.JS.Streams() {
-			streamName := streamInfo.Config.Name
-			for ci := range ac.JS.Consumers(streamName) {
-				reason := ""
-				if ci.NumAckPending >= slowConsumerAckPendingThreshold {
-					reason = "high ack-pending"
-				} else if ci.NumPending >= uint64(slowConsumerPendingMsgThreshold) {
-					reason = "high pending messages"
-				} else {
-					continue
-				}
+		for _, ci := range allConsumers {
+			reason := ""
+			if ci.AckPending >= slowConsumerAckPendingThreshold {
+				reason = "high ack-pending"
+			} else if ci.PendingMessages >= uint64(slowConsumerPendingMsgThreshold) {
+				reason = "high pending messages"
+			} else {
+				continue
+			}
 
-				slow = append(slow, models.SlowConsumer{
-					ConsumerInfo: models.ConsumerInfo{
-						Name:            ci.Name,
-						StreamName:      streamName,
-						DeliverPolicy:   fmt.Sprintf("%v", ci.Config.DeliverPolicy),
-						AckPolicy:       fmt.Sprintf("%v", ci.Config.AckPolicy),
-						FilterSubject:   ci.Config.FilterSubject,
-						PendingMessages: ci.NumPending,
-						AckPending:      ci.NumAckPending,
-						WaitingPulls:    ci.NumWaiting,
-						TotalDelivered:  ci.Delivered.Consumer,
-						IsPull:          ci.Config.DeliverSubject == "",
-						DeliverSubject:  ci.Config.DeliverSubject,
-					},
-					Reason: reason,
-				})
-				if len(slow) >= slowConsumerMaxResults {
-					break
-				}
+			slow = append(slow, models.SlowConsumer{
+				ConsumerInfo: ci,
+				Reason:       reason,
+			})
+			if len(slow) >= slowConsumerMaxResults {
+				break
 			}
 		}
-		done <- slow
-	}()
-
-	select {
-	case slow := <-done:
 		health.SlowConsumers = slow
-	case <-time.After(b.timeoutConfig.ConsumerListTimeout):
-		// Leave SlowConsumers empty rather than failing the whole health check.
 	}
+	// If the cache/refresh failed or timed out, leave SlowConsumers empty
+	// rather than failing the whole health check.
 
 	return health, nil
 }

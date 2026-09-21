@@ -14,6 +14,7 @@ type TimeoutConfig struct {
 	ConsumerListTimeout time.Duration
 	KVListTimeout       time.Duration
 	MessageFetchTimeout time.Duration
+	ListCacheTTL        time.Duration
 }
 
 // LoadTimeoutConfig loads timeout configuration from environment variables
@@ -25,6 +26,10 @@ func LoadTimeoutConfig() *TimeoutConfig {
 		ConsumerListTimeout: parseTimeout("NATS_CONSUMER_LIST_TIMEOUT", 300),
 		KVListTimeout:       parseTimeout("NATS_KV_LIST_TIMEOUT", 300),
 		MessageFetchTimeout: parseTimeout("NATS_MESSAGE_FETCH_TIMEOUT", 300),
+		// How long a fetched stream/consumer list is served from cache before
+		// being refreshed from NATS. Keeps dashboard polling and pagination
+		// from repeatedly re-listing thousands of streams/consumers.
+		ListCacheTTL: parseTimeout("NATS_LIST_CACHE_TTL", 20),
 	}
 }
 
