@@ -3,10 +3,13 @@ package nats
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nats-ui/config"
@@ -16,25 +19,164 @@ import (
 	gonats "github.com/nats-io/nats.go"
 )
 
-// listCache holds a short-lived, per-connection cache of the full stream and
-// consumer lists. Listing streams/consumers against a large deployment (e.g.
-// thousands of streams/consumers) is expensive on the NATS meta-leader, so we
-// avoid re-fetching on every paginated request or every dashboard poll.
-type listCache struct {
-	mu                 sync.Mutex
-	streams            []models.StreamInfo
-	streamsFetchedAt   time.Time
-	consumers          []models.ConsumerInfo
-	consumersFetchedAt time.Time
+// incompleteRetryDelay is how long an incomplete list is served before a
+// background retry.
+const incompleteRetryDelay = 3 * time.Second
+
+// natsCallWait bounds each individual JetStream list API request.
+const natsCallWait = 10 * time.Second
+
+// cacheEntry is a stale-while-revalidate cache slot. Once populated, reads are
+// always served instantly from memory; when older than the TTL a single
+// background refresh is started (coalesced across callers). Only a cold or
+// explicitly invalidated entry makes a caller wait for NATS. Results flagged
+// incomplete by the fetcher are returned but never cached.
+type cacheEntry[T any] struct {
+	data      T
+	last      T
+	valid     bool
+	hasData   bool
+	fetchedAt time.Time
+	gen       uint64
+	flight    chan struct{}
 }
 
-// invalidate clears the cache so the next read forces a fresh fetch. Called
-// after any mutation (create/delete/update of streams or consumers).
+// listCache holds per-connection caches of the full stream and consumer lists.
+// Listing thousands of streams/consumers takes seconds on the NATS meta-leader.
+type listCache struct {
+	mu        sync.Mutex
+	streams   cacheEntry[[]models.StreamInfo]
+	consumers cacheEntry[[]models.ConsumerInfo]
+	account   cacheEntry[*gonats.AccountInfo]
+	kvEntries map[string]*cacheEntry[[]models.KVEntry]
+}
+
+// invalidate drops cached data so the next read fetches fresh. Called after
+// any mutation (create/delete/update of streams or consumers).
 func (c *listCache) invalidate() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.streamsFetchedAt = time.Time{}
-	c.consumersFetchedAt = time.Time{}
+	c.streams.valid = false
+	c.streams.hasData = false
+	c.streams.gen++
+	c.consumers.valid = false
+	c.consumers.hasData = false
+	c.consumers.gen++
+	c.account.valid = false
+	c.account.hasData = false
+	c.account.gen++
+	for _, e := range c.kvEntries {
+		e.valid = false
+		e.hasData = false
+		e.gen++
+	}
+}
+
+// invalidateKV drops the cached entries of one bucket (and the stream list,
+// whose per-bucket entry counts and sizes just changed).
+func (c *listCache) invalidateKV(bucket string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.kvEntries[bucket]; ok {
+		e.valid = false
+		e.hasData = false
+		e.gen++
+	}
+	c.streams.valid = false
+	c.streams.hasData = false
+	c.streams.gen++
+}
+
+func (c *listCache) kvEntry(bucket string) *cacheEntry[[]models.KVEntry] {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.kvEntries == nil {
+		c.kvEntries = make(map[string]*cacheEntry[[]models.KVEntry])
+	}
+	e, ok := c.kvEntries[bucket]
+	if !ok {
+		e = &cacheEntry[[]models.KVEntry]{}
+		c.kvEntries[bucket] = e
+	}
+	return e
+}
+
+// getCached returns cached data, refreshing via fetch as needed. fetch returns
+// the data and whether it is complete enough to cache.
+func getCached[T any](mu *sync.Mutex, e *cacheEntry[T], ttl, timeout time.Duration, fetch func() (T, bool)) (T, error) {
+	deadline := time.After(timeout)
+	for {
+		mu.Lock()
+		if e.valid {
+			data := e.data
+			if time.Since(e.fetchedAt) >= ttl {
+				startRefresh(mu, e, ttl, fetch)
+			}
+			mu.Unlock()
+			return data, nil
+		}
+		gen := e.gen
+		flight := startRefresh(mu, e, ttl, fetch)
+		mu.Unlock()
+
+		select {
+		case <-flight:
+		case <-deadline:
+			var zero T
+			return zero, fmt.Errorf("listing timed out")
+		}
+
+		mu.Lock()
+		valid, last, changed := e.valid, e.last, e.gen != gen
+		mu.Unlock()
+		if valid || !changed {
+			return last, nil
+		}
+	}
+}
+
+// ensureWarm reports whether the entry holds valid data, starting a
+// background load when it does not.
+func ensureWarm[T any](mu *sync.Mutex, e *cacheEntry[T], ttl time.Duration, fetch func() (T, bool)) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	if e.valid {
+		return true
+	}
+	startRefresh(mu, e, ttl, fetch)
+	return false
+}
+
+// startRefresh starts a background fetch unless one is already running.
+// Caller must hold mu.
+func startRefresh[T any](mu *sync.Mutex, e *cacheEntry[T], ttl time.Duration, fetch func() (T, bool)) chan struct{} {
+	if e.flight != nil {
+		return e.flight
+	}
+	flight := make(chan struct{})
+	e.flight = flight
+	gen := e.gen
+	go func() {
+		data, ok := fetch()
+		mu.Lock()
+		if gen == e.gen {
+			e.last = data
+			if ok || !e.hasData {
+				e.data = data
+			}
+			e.hasData = true
+			e.valid = true
+			e.fetchedAt = time.Now()
+			if !ok {
+				// Incomplete: serve it, but let the next read trigger a quick retry.
+				e.fetchedAt = e.fetchedAt.Add(-ttl + incompleteRetryDelay)
+			}
+		}
+		e.flight = nil
+		mu.Unlock()
+		close(flight)
+	}()
+	return flight
 }
 
 type ActiveConnection struct {
@@ -99,6 +241,8 @@ func (b *Bridge) Connect(conn models.Connection) (*models.ServerInfo, error) {
 	b.connections[conn.ID] = ac
 	b.mu.Unlock()
 
+	b.warmCache(ac)
+
 	connectedURL := nc.ConnectedUrl()
 	trimmed := strings.TrimPrefix(strings.TrimPrefix(connectedURL, "nats://"), "tls://")
 	host, portStr, _ := net.SplitHostPort(trimmed)
@@ -157,49 +301,264 @@ func (b *Bridge) GetStreams(connectionID string) ([]models.StreamInfo, error) {
 	return streams, nil
 }
 
-// fetchAllStreams performs the actual (expensive) STREAM.LIST walk against
-// NATS. Callers should generally go through getAllStreamsCached instead.
-func fetchAllStreams(ac *ActiveConnection) []models.StreamInfo {
-	result := make([]models.StreamInfo, 0)
-	for info := range ac.JS.Streams() {
-		result = append(result, models.StreamInfo{
-			Name:         info.Config.Name,
-			Subjects:     info.Config.Subjects,
-			Messages:     info.State.Msgs,
-			Bytes:        info.State.Bytes,
-			Consumers:    info.State.Consumers,
-			NumSubjects:  info.State.NumSubjects,
-			Replicas:     info.Config.Replicas,
-			Storage:      fmt.Sprintf("%v", info.Config.Storage),
-			Retention:    fmt.Sprintf("%v", info.Config.Retention),
-			MaxMsgs:      info.Config.MaxMsgs,
-			MaxBytes:     info.Config.MaxBytes,
-			MaxAge:       int64(info.Config.MaxAge.Seconds()),
-			MaxConsumers: info.Config.MaxConsumers,
-		})
-	}
-	return result
+// listRequest sends one paged JetStream list API request, retrying transient
+// failures. The nats.go list iterators silently stop on the first failed page,
+// which produced truncated lists, so paging is done explicitly here.
+func listRequest(ac *ActiveConnection, subject string, offset int, wait time.Duration, out any) error {
+	payload, _ := json.Marshal(map[string]int{"offset": offset})
+	return apiRequest(ac, subject, payload, wait, out)
 }
 
-// fetchConsumersForStream performs a single CONSUMER.LIST call for one stream.
-func fetchConsumersForStream(ac *ActiveConnection, streamName string) []models.ConsumerInfo {
-	result := make([]models.ConsumerInfo, 0)
-	for ci := range ac.JS.Consumers(streamName) {
-		result = append(result, models.ConsumerInfo{
-			Name:            ci.Name,
-			StreamName:      streamName,
-			DeliverPolicy:   fmt.Sprintf("%v", ci.Config.DeliverPolicy),
-			AckPolicy:       fmt.Sprintf("%v", ci.Config.AckPolicy),
-			FilterSubject:   ci.Config.FilterSubject,
-			PendingMessages: ci.NumPending,
-			AckPending:      ci.NumAckPending,
-			WaitingPulls:    ci.NumWaiting,
-			TotalDelivered:  ci.Delivered.Consumer,
-			IsPull:          ci.Config.DeliverSubject == "",
-			DeliverSubject:  ci.Config.DeliverSubject,
-		})
+// apiRequest sends a JetStream API request with retries on transient failure.
+func apiRequest(ac *ActiveConnection, subject string, payload []byte, wait time.Duration, out any) error {
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
+		}
+		msg, err := ac.NC.Request(subject, payload, wait)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		var apiErr struct {
+			Error *struct {
+				Code        int    `json:"code"`
+				Description string `json:"description"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(msg.Data, &apiErr); err == nil && apiErr.Error != nil {
+			lastErr = fmt.Errorf("%s (%d)", apiErr.Error.Description, apiErr.Error.Code)
+			continue
+		}
+		if err := json.Unmarshal(msg.Data, out); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
 	}
-	return result
+	return lastErr
+}
+
+func toStreamInfo(info *gonats.StreamInfo) models.StreamInfo {
+	return models.StreamInfo{
+		Name:         info.Config.Name,
+		Subjects:     info.Config.Subjects,
+		Messages:     info.State.Msgs,
+		Bytes:        info.State.Bytes,
+		Consumers:    info.State.Consumers,
+		NumSubjects:  info.State.NumSubjects,
+		Replicas:     info.Config.Replicas,
+		Storage:      fmt.Sprintf("%v", info.Config.Storage),
+		Retention:    fmt.Sprintf("%v", info.Config.Retention),
+		MaxMsgs:      info.Config.MaxMsgs,
+		MaxBytes:     info.Config.MaxBytes,
+		MaxAge:       int64(info.Config.MaxAge.Seconds()),
+		MaxConsumers: info.Config.MaxConsumers,
+	}
+}
+
+// fetchStreamNames lists all stream names via STREAM.NAMES, which is far
+// cheaper than STREAM.LIST because no stream state is gathered.
+func fetchStreamNames(ac *ActiveConnection, wait time.Duration) ([]string, error) {
+	names := make([]string, 0)
+	for {
+		var page struct {
+			Total   int      `json:"total"`
+			Streams []string `json:"streams"`
+		}
+		if err := listRequest(ac, "$JS.API.STREAM.NAMES", len(names), wait, &page); err != nil {
+			return nil, err
+		}
+		names = append(names, page.Streams...)
+		if len(page.Streams) == 0 || len(names) >= page.Total {
+			sort.Strings(names)
+			return names, nil
+		}
+	}
+}
+
+// fastStreamsPage serves one page of streams straight from NATS without the
+// full list: STREAM.LIST from the offset when unfiltered, otherwise
+// STREAM.NAMES + parallel STREAM.INFO for just the page.
+func fastStreamsPage(ac *ActiveConnection, offset, limit int, search string) ([]models.StreamInfo, int, error) {
+	if search == "" {
+		out := make([]models.StreamInfo, 0, limit)
+		total := 0
+		for pos := offset; len(out) < limit; {
+			var page struct {
+				Total   int                  `json:"total"`
+				Streams []*gonats.StreamInfo `json:"streams"`
+			}
+			if err := listRequest(ac, "$JS.API.STREAM.LIST", pos, natsCallWait, &page); err != nil {
+				return nil, 0, err
+			}
+			total = page.Total
+			if len(page.Streams) == 0 {
+				break
+			}
+			for _, info := range page.Streams {
+				if len(out) < limit {
+					out = append(out, toStreamInfo(info))
+				}
+			}
+			pos += len(page.Streams)
+			if pos >= total {
+				break
+			}
+		}
+		return out, total, nil
+	}
+
+	names, err := fetchStreamNames(ac, natsCallWait)
+	if err != nil {
+		return nil, 0, err
+	}
+	matched := names[:0]
+	for _, n := range names {
+		if strings.Contains(strings.ToLower(n), search) {
+			matched = append(matched, n)
+		}
+	}
+	total := len(matched)
+	start, end := offset, offset+limit
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+	pageNames := matched[start:end]
+
+	infos := make([]*gonats.StreamInfo, len(pageNames))
+	var wg sync.WaitGroup
+	var failed atomic.Bool
+	for i, n := range pageNames {
+		wg.Add(1)
+		go func(i int, n string) {
+			defer wg.Done()
+			var info gonats.StreamInfo
+			if err := apiRequest(ac, "$JS.API.STREAM.INFO."+n, nil, natsCallWait, &info); err != nil {
+				failed.Store(true)
+				return
+			}
+			infos[i] = &info
+		}(i, n)
+	}
+	wg.Wait()
+	if failed.Load() {
+		return nil, 0, fmt.Errorf("failed to load stream info")
+	}
+	out := make([]models.StreamInfo, 0, len(infos))
+	for _, info := range infos {
+		out = append(out, toStreamInfo(info))
+	}
+	return out, total, nil
+}
+
+// fastConsumersFirstPage returns the first page of consumers (unfiltered)
+// by walking streams in name order in small parallel batches until the page
+// is full, instead of listing every stream's consumers.
+func fastConsumersFirstPage(ac *ActiveConnection, limit int) ([]models.ConsumerInfo, int, error) {
+	names, err := fetchStreamNames(ac, natsCallWait)
+	if err != nil {
+		return nil, 0, err
+	}
+	total := 0
+	if ai, err := ac.JS.AccountInfo(); err == nil && ai != nil {
+		total = ai.Consumers
+	}
+
+	out := make([]models.ConsumerInfo, 0, limit)
+	for i := 0; i < len(names) && len(out) < limit; i += consumerFetchWorkers {
+		end := i + consumerFetchWorkers
+		if end > len(names) {
+			end = len(names)
+		}
+		batch := make([][]models.ConsumerInfo, end-i)
+		var wg sync.WaitGroup
+		var failed atomic.Bool
+		for j := i; j < end; j++ {
+			wg.Add(1)
+			go func(j int) {
+				defer wg.Done()
+				got, ok := fetchConsumersForStream(ac, names[j], natsCallWait)
+				if !ok {
+					failed.Store(true)
+				}
+				batch[j-i] = got
+			}(j)
+		}
+		wg.Wait()
+		if failed.Load() {
+			return nil, 0, fmt.Errorf("failed to load consumers")
+		}
+		for _, got := range batch {
+			sort.Slice(got, func(a, b int) bool { return got[a].Name < got[b].Name })
+			out = append(out, got...)
+		}
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	if total < len(out) {
+		total = len(out)
+	}
+	return out, total, nil
+}
+
+// fetchAllStreams walks STREAM.LIST page by page. The bool reports whether
+// every stream the server reported was retrieved.
+func fetchAllStreams(ac *ActiveConnection, wait time.Duration) ([]models.StreamInfo, bool) {
+	result := make([]models.StreamInfo, 0)
+	for {
+		var page struct {
+			Total   int                  `json:"total"`
+			Streams []*gonats.StreamInfo `json:"streams"`
+		}
+		if err := listRequest(ac, "$JS.API.STREAM.LIST", len(result), wait, &page); err != nil {
+			return result, false
+		}
+		for _, info := range page.Streams {
+			result = append(result, toStreamInfo(info))
+		}
+		if len(page.Streams) == 0 || len(result) >= page.Total {
+			sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+			return result, len(result) >= page.Total
+		}
+	}
+}
+
+// fetchConsumersForStream walks CONSUMER.LIST page by page for one stream.
+func fetchConsumersForStream(ac *ActiveConnection, streamName string, wait time.Duration) ([]models.ConsumerInfo, bool) {
+	result := make([]models.ConsumerInfo, 0)
+	for {
+		var page struct {
+			Total     int                    `json:"total"`
+			Consumers []*gonats.ConsumerInfo `json:"consumers"`
+		}
+		if err := listRequest(ac, "$JS.API.CONSUMER.LIST."+streamName, len(result), wait, &page); err != nil {
+			return result, false
+		}
+		for _, ci := range page.Consumers {
+			result = append(result, models.ConsumerInfo{
+				Name:            ci.Name,
+				StreamName:      streamName,
+				DeliverPolicy:   fmt.Sprintf("%v", ci.Config.DeliverPolicy),
+				AckPolicy:       fmt.Sprintf("%v", ci.Config.AckPolicy),
+				FilterSubject:   ci.Config.FilterSubject,
+				PendingMessages: ci.NumPending,
+				AckPending:      ci.NumAckPending,
+				WaitingPulls:    ci.NumWaiting,
+				TotalDelivered:  ci.Delivered.Consumer,
+				IsPull:          ci.Config.DeliverSubject == "",
+				DeliverSubject:  ci.Config.DeliverSubject,
+			})
+		}
+		if len(page.Consumers) == 0 || len(result) >= page.Total {
+			return result, len(result) >= page.Total
+		}
+	}
 }
 
 // fetchConsumersParallel fetches consumers for many streams concurrently
@@ -207,9 +566,9 @@ func fetchConsumersForStream(ac *ActiveConnection, streamName string) []models.C
 // stream sequentially. This is the main fix for consumer listing timing out
 // on deployments with thousands of streams: sequentially it's N round trips
 // to the meta-leader, one per stream.
-func fetchConsumersParallel(ac *ActiveConnection, streamNames []string) []models.ConsumerInfo {
+func fetchConsumersParallel(ac *ActiveConnection, streamNames []string, wait time.Duration) ([]models.ConsumerInfo, bool) {
 	if len(streamNames) == 0 {
-		return []models.ConsumerInfo{}
+		return []models.ConsumerInfo{}, true
 	}
 
 	jobs := make(chan string, len(streamNames))
@@ -225,6 +584,7 @@ func fetchConsumersParallel(ac *ActiveConnection, streamNames []string) []models
 
 	resultsCh := make(chan []models.ConsumerInfo, workerCount)
 	var wg sync.WaitGroup
+	var incomplete atomic.Bool
 
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
@@ -232,7 +592,11 @@ func fetchConsumersParallel(ac *ActiveConnection, streamNames []string) []models
 			defer wg.Done()
 			local := make([]models.ConsumerInfo, 0)
 			for streamName := range jobs {
-				local = append(local, fetchConsumersForStream(ac, streamName)...)
+				got, ok := fetchConsumersForStream(ac, streamName, wait)
+				if !ok {
+					incomplete.Store(true)
+				}
+				local = append(local, got...)
 			}
 			resultsCh <- local
 		}()
@@ -245,75 +609,60 @@ func fetchConsumersParallel(ac *ActiveConnection, streamNames []string) []models
 	for r := range resultsCh {
 		all = append(all, r...)
 	}
-	return all
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].StreamName != all[j].StreamName {
+			return all[i].StreamName < all[j].StreamName
+		}
+		return all[i].Name < all[j].Name
+	})
+	return all, !incomplete.Load()
 }
 
-// getAllStreamsCached returns the full stream list, serving from a short-lived
-// cache when possible so repeated/paginated/polled requests don't each pay
-// the cost of a full STREAM.LIST walk.
+// getAllStreamsCached returns the full stream list from the stale-while-
+// revalidate cache.
+func (b *Bridge) streamsFetcher(ac *ActiveConnection) func() ([]models.StreamInfo, bool) {
+	return func() ([]models.StreamInfo, bool) { return fetchAllStreams(ac, natsCallWait) }
+}
+
+func (b *Bridge) consumersFetcher(ac *ActiveConnection) func() ([]models.ConsumerInfo, bool) {
+	return func() ([]models.ConsumerInfo, bool) {
+		streams, err := b.getAllStreamsCached(ac)
+		if err != nil {
+			return []models.ConsumerInfo{}, false
+		}
+		names := make([]string, 0, len(streams))
+		expected := 0
+		for _, s := range streams {
+			if s.Consumers == 0 {
+				continue
+			}
+			names = append(names, s.Name)
+			expected += s.Consumers
+		}
+		result, ok := fetchConsumersParallel(ac, names, natsCallWait)
+		return result, ok && len(result) >= expected
+	}
+}
+
 func (b *Bridge) getAllStreamsCached(ac *ActiveConnection) ([]models.StreamInfo, error) {
-	ac.cache.mu.Lock()
-	if !ac.cache.streamsFetchedAt.IsZero() && time.Since(ac.cache.streamsFetchedAt) < b.timeoutConfig.ListCacheTTL {
-		streams := ac.cache.streams
-		ac.cache.mu.Unlock()
-		return streams, nil
-	}
-	ac.cache.mu.Unlock()
-
-	done := make(chan []models.StreamInfo, 1)
-	go func() {
-		done <- fetchAllStreams(ac)
-	}()
-
-	select {
-	case result := <-done:
-		ac.cache.mu.Lock()
-		ac.cache.streams = result
-		ac.cache.streamsFetchedAt = time.Now()
-		ac.cache.mu.Unlock()
-		return result, nil
-	case <-time.After(b.timeoutConfig.StreamListTimeout):
-		return nil, fmt.Errorf("stream listing timed out")
-	}
+	return getCached(&ac.cache.mu, &ac.cache.streams, b.timeoutConfig.ListCacheTTL, b.timeoutConfig.StreamListTimeout, b.streamsFetcher(ac))
 }
 
-// getAllConsumersCached returns the full consumer list across all streams,
-// serving from a short-lived cache when possible. On a cache miss it fetches
-// consumers for every stream concurrently (see fetchConsumersParallel).
+// getAllConsumersCached returns the full consumer list across all streams from
+// the stale-while-revalidate cache.
 func (b *Bridge) getAllConsumersCached(ac *ActiveConnection) ([]models.ConsumerInfo, error) {
-	ac.cache.mu.Lock()
-	if !ac.cache.consumersFetchedAt.IsZero() && time.Since(ac.cache.consumersFetchedAt) < b.timeoutConfig.ListCacheTTL {
-		consumers := ac.cache.consumers
-		ac.cache.mu.Unlock()
-		return consumers, nil
-	}
-	ac.cache.mu.Unlock()
+	return getCached(&ac.cache.mu, &ac.cache.consumers, b.timeoutConfig.ListCacheTTL, b.timeoutConfig.ConsumerListTimeout, b.consumersFetcher(ac))
+}
 
-	streams, err := b.getAllStreamsCached(ac)
-	if err != nil {
-		return nil, err
+// warmCache prefetches both lists in the background so the first UI request
+// is served from memory.
+func (b *Bridge) warmCache(ac *ActiveConnection) {
+	if ac.JS == nil {
+		return
 	}
-
-	streamNames := make([]string, len(streams))
-	for i, s := range streams {
-		streamNames[i] = s.Name
-	}
-
-	done := make(chan []models.ConsumerInfo, 1)
 	go func() {
-		done <- fetchConsumersParallel(ac, streamNames)
+		_, _ = b.getAllConsumersCached(ac)
 	}()
-
-	select {
-	case result := <-done:
-		ac.cache.mu.Lock()
-		ac.cache.consumers = result
-		ac.cache.consumersFetchedAt = time.Now()
-		ac.cache.mu.Unlock()
-		return result, nil
-	case <-time.After(b.timeoutConfig.ConsumerListTimeout):
-		return nil, fmt.Errorf("consumer listing timed out")
-	}
 }
 
 // GetStreamsPaginated fetches streams with pagination and filtering support
@@ -338,13 +687,20 @@ func (b *Bridge) GetStreamsPaginated(connectionID string, offset, limit int, sea
 		limit = 50
 	}
 
+	searchLower := strings.ToLower(searchFilter)
+
+	// Cold cache: warm it in the background and answer this request with just
+	// the requested page straight from NATS.
+	if !ensureWarm(&ac.cache.mu, &ac.cache.streams, b.timeoutConfig.ListCacheTTL, b.streamsFetcher(ac)) {
+		if page, total, err := fastStreamsPage(ac, offset, limit, searchLower); err == nil {
+			return &models.PaginatedStreams{Streams: page, Total: total, Offset: offset, Limit: limit}, nil
+		}
+	}
+
 	allStreams, err := b.getAllStreamsCached(ac)
 	if err != nil {
 		return nil, err
 	}
-
-	// Normalize search filter to lowercase for case-insensitive matching
-	searchLower := strings.ToLower(searchFilter)
 	filtered := allStreams
 	if searchLower != "" {
 		filtered = make([]models.StreamInfo, 0, len(allStreams))
@@ -399,13 +755,20 @@ func (b *Bridge) GetConsumersPaginated(connectionID string, offset, limit int, s
 		limit = 50
 	}
 
+	searchLower := strings.ToLower(searchFilter)
+
+	warm := ensureWarm(&ac.cache.mu, &ac.cache.consumers, b.timeoutConfig.ListCacheTTL, b.consumersFetcher(ac))
+	log.Printf("consumers page: cache_warm=%v offset=%d search=%q", warm, offset, searchLower)
+	if !warm && offset == 0 && searchLower == "" {
+		if page, total, err := fastConsumersFirstPage(ac, limit); err == nil {
+			return &models.PaginatedConsumers{Consumers: page, Total: total, Offset: offset, Limit: limit}, nil
+		}
+	}
+
 	allConsumers, err := b.getAllConsumersCached(ac)
 	if err != nil {
 		return nil, err
 	}
-
-	// Normalize search filter to lowercase for case-insensitive matching
-	searchLower := strings.ToLower(searchFilter)
 	filtered := allConsumers
 	if searchLower != "" {
 		filtered = make([]models.ConsumerInfo, 0, len(allConsumers))
@@ -1104,21 +1467,11 @@ func (b *Bridge) GetConsumers(connectionID, streamName string) ([]models.Consume
 		return nil, fmt.Errorf("JetStream not available")
 	}
 
-	consumers := make([]models.ConsumerInfo, 0)
-	for ci := range ac.JS.Consumers(streamName) {
-		consumers = append(consumers, models.ConsumerInfo{
-			Name:            ci.Name,
-			DeliverPolicy:   fmt.Sprintf("%v", ci.Config.DeliverPolicy),
-			AckPolicy:       fmt.Sprintf("%v", ci.Config.AckPolicy),
-			FilterSubject:   ci.Config.FilterSubject,
-			PendingMessages: ci.NumPending,
-			AckPending:      ci.NumAckPending,
-			WaitingPulls:    ci.NumWaiting,
-			TotalDelivered:  ci.Delivered.Consumer,
-			IsPull:          ci.Config.DeliverSubject == "",
-			DeliverSubject:  ci.Config.DeliverSubject,
-		})
+	consumers, ok := fetchConsumersForStream(ac, streamName, natsCallWait)
+	if !ok && len(consumers) == 0 {
+		return nil, fmt.Errorf("failed to list consumers for stream %s", streamName)
 	}
+	sort.Slice(consumers, func(i, j int) bool { return consumers[i].Name < consumers[j].Name })
 	return consumers, nil
 }
 
@@ -1229,62 +1582,115 @@ func (b *Bridge) GetKVBucketsPaginated(connectionID string, offset, limit int, s
 
 	searchLower := strings.ToLower(searchFilter)
 
-	done := make(chan *models.PaginatedKVBuckets, 1)
-	go func() {
-		allBuckets := make([]models.KVBucketInfo, 0)
-
-		// Get all KV buckets
-		for streamInfo := range ac.JS.Streams() {
-			// KV buckets are stored as streams with name pattern "KV_<bucket-name>"
-			if !strings.HasPrefix(streamInfo.Config.Name, "KV_") {
-				continue
-			}
-
-			bucketName := strings.TrimPrefix(streamInfo.Config.Name, "KV_")
-			if searchLower != "" && !strings.Contains(strings.ToLower(bucketName), searchLower) {
-				continue
-			}
-
-			bucket := models.KVBucketInfo{
-				Name:       bucketName,
-				Entries:    streamInfo.State.Msgs,
-				Bytes:      streamInfo.State.Bytes,
-				CreatedAt:  time.Now().UnixMilli(), // Would need stream metadata for actual creation time
-				LastUpdate: time.Now().UnixMilli(),
-			}
-			allBuckets = append(allBuckets, bucket)
-		}
-
-		total := len(allBuckets)
-		start := offset
-		end := offset + limit
-
-		if start > total {
-			start = total
-		}
-		if end > total {
-			end = total
-		}
-
-		paginatedBuckets := allBuckets[start:end]
-		if paginatedBuckets == nil {
-			paginatedBuckets = []models.KVBucketInfo{}
-		}
-
-		done <- &models.PaginatedKVBuckets{
-			Buckets: paginatedBuckets,
-			Total:   total,
-			Offset:  offset,
-			Limit:   limit,
-		}
-	}()
-
-	select {
-	case result := <-done:
-		return result, nil
-	case <-time.After(b.timeoutConfig.KVListTimeout):
-		return nil, fmt.Errorf("KV bucket listing timed out")
+	streams, err := b.getAllStreamsCached(ac)
+	if err != nil {
+		return nil, err
 	}
+
+	// KV buckets are streams named "KV_<bucket-name>".
+	allBuckets := make([]models.KVBucketInfo, 0)
+	now := time.Now().UnixMilli()
+	for _, si := range streams {
+		if !strings.HasPrefix(si.Name, "KV_") {
+			continue
+		}
+		bucketName := strings.TrimPrefix(si.Name, "KV_")
+		if searchLower != "" && !strings.Contains(strings.ToLower(bucketName), searchLower) {
+			continue
+		}
+		allBuckets = append(allBuckets, models.KVBucketInfo{
+			Name:       bucketName,
+			Entries:    si.Messages,
+			Bytes:      si.Bytes,
+			CreatedAt:  now,
+			LastUpdate: now,
+		})
+	}
+
+	total := len(allBuckets)
+	start, end := offset, offset+limit
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+
+	return &models.PaginatedKVBuckets{
+		Buckets: append([]models.KVBucketInfo{}, allBuckets[start:end]...),
+		Total:   total,
+		Offset:  offset,
+		Limit:   limit,
+	}, nil
+}
+
+// kvFetchWorkers bounds concurrent kv.Get calls when loading a bucket.
+const kvFetchWorkers = 20
+
+// fetchKVEntries loads every live entry of a bucket using a worker pool. The
+// bool reports whether all keys were read successfully.
+func fetchKVEntries(kv gonats.KeyValue) ([]models.KVEntry, bool) {
+	keys, err := kv.Keys()
+	if err != nil {
+		if err == gonats.ErrNoKeysFound {
+			return []models.KVEntry{}, true
+		}
+		return []models.KVEntry{}, false
+	}
+
+	jobs := make(chan string, len(keys))
+	for _, k := range keys {
+		jobs <- k
+	}
+	close(jobs)
+
+	workers := kvFetchWorkers
+	if workers > len(keys) {
+		workers = len(keys)
+	}
+
+	var (
+		mu         sync.Mutex
+		wg         sync.WaitGroup
+		entries    = make([]models.KVEntry, 0, len(keys))
+		incomplete bool
+	)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for key := range jobs {
+				var entry gonats.KeyValueEntry
+				var err error
+				for attempt := 0; attempt < 3; attempt++ {
+					entry, err = kv.Get(key)
+					if err == nil || err == gonats.ErrKeyNotFound {
+						break
+					}
+					time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+				}
+				mu.Lock()
+				switch {
+				case err == nil:
+					entries = append(entries, models.KVEntry{
+						Key:       key,
+						Value:     string(entry.Value()),
+						Bytes:     len(entry.Value()),
+						Timestamp: entry.Created().UnixMilli(),
+						Revision:  entry.Revision(),
+						Operation: "PUT",
+					})
+				case err != gonats.ErrKeyNotFound: // not-found means deleted since Keys()
+					incomplete = true
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
+	return entries, !incomplete
 }
 
 func (b *Bridge) GetKVEntriesPaginated(connectionID, bucketName string, offset, limit int, searchFilter string) (*models.PaginatedKVEntries, error) {
@@ -1315,65 +1721,37 @@ func (b *Bridge) GetKVEntriesPaginated(connectionID, bucketName string, offset, 
 		return nil, fmt.Errorf("failed to get KV bucket: %w", err)
 	}
 
-	done := make(chan *models.PaginatedKVEntries, 1)
-	go func() {
-		allEntries := make([]models.KVEntry, 0)
-
-		// Get all keys from bucket
-		keys, err := kv.Keys()
-		if err == nil {
-			for _, key := range keys {
-				if searchLower != "" && !strings.Contains(strings.ToLower(key), searchLower) {
-					continue
-				}
-
-				entry, err := kv.Get(key)
-				if err != nil {
-					continue // Skip deleted entries
-				}
-
-				kvEntry := models.KVEntry{
-					Key:       key,
-					Value:     string(entry.Value()),
-					Bytes:     len(entry.Value()),
-					Timestamp: entry.Created().UnixMilli(),
-					Revision:  entry.Revision(),
-					Operation: "PUT",
-				}
-				allEntries = append(allEntries, kvEntry)
-			}
-		}
-
-		total := len(allEntries)
-		start := offset
-		end := offset + limit
-
-		if start > total {
-			start = total
-		}
-		if end > total {
-			end = total
-		}
-
-		paginatedEntries := allEntries[start:end]
-		if paginatedEntries == nil {
-			paginatedEntries = []models.KVEntry{}
-		}
-
-		done <- &models.PaginatedKVEntries{
-			Entries: paginatedEntries,
-			Total:   total,
-			Offset:  offset,
-			Limit:   limit,
-		}
-	}()
-
-	select {
-	case result := <-done:
-		return result, nil
-	case <-time.After(b.timeoutConfig.KVListTimeout):
+	allEntries, err := getCached(&ac.cache.mu, ac.cache.kvEntry(bucketName), b.timeoutConfig.ListCacheTTL, b.timeoutConfig.KVListTimeout,
+		func() ([]models.KVEntry, bool) { return fetchKVEntries(kv) })
+	if err != nil {
 		return nil, fmt.Errorf("KV entries listing timed out")
 	}
+
+	filtered := allEntries
+	if searchLower != "" {
+		filtered = make([]models.KVEntry, 0, len(allEntries))
+		for _, en := range allEntries {
+			if strings.Contains(strings.ToLower(en.Key), searchLower) {
+				filtered = append(filtered, en)
+			}
+		}
+	}
+
+	total := len(filtered)
+	start, end := offset, offset+limit
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+
+	return &models.PaginatedKVEntries{
+		Entries: append([]models.KVEntry{}, filtered[start:end]...),
+		Total:   total,
+		Offset:  offset,
+		Limit:   limit,
+	}, nil
 }
 
 func (b *Bridge) PutKV(connectionID, bucketName, key, value string) error {
@@ -1395,6 +1773,9 @@ func (b *Bridge) PutKV(connectionID, bucketName, key, value string) error {
 	}
 
 	_, err = kv.Put(key, []byte(value))
+	if err == nil {
+		ac.cache.invalidateKV(bucketName)
+	}
 	return err
 }
 
@@ -1416,7 +1797,11 @@ func (b *Bridge) DeleteKV(connectionID, bucketName, key string) error {
 		return fmt.Errorf("failed to get KV bucket: %w", err)
 	}
 
-	return kv.Delete(key)
+	err = kv.Delete(key)
+	if err == nil {
+		ac.cache.invalidateKV(bucketName)
+	}
+	return err
 }
 
 func (b *Bridge) CreateKVBucket(connectionID, bucketName string) error {
@@ -1436,6 +1821,9 @@ func (b *Bridge) CreateKVBucket(connectionID, bucketName string) error {
 	_, err := ac.JS.CreateKeyValue(&gonats.KeyValueConfig{
 		Bucket: bucketName,
 	})
+	if err == nil {
+		ac.cache.invalidate()
+	}
 	return err
 }
 
@@ -1453,7 +1841,11 @@ func (b *Bridge) DeleteKVBucket(connectionID, bucketName string) error {
 	}
 
 	// KV buckets are stored as streams with name pattern "KV_<bucket-name>"
-	return ac.JS.DeleteStream("KV_" + bucketName)
+	err := ac.JS.DeleteStream("KV_" + bucketName)
+	if err == nil {
+		ac.cache.invalidate()
+	}
+	return err
 }
 
 // Observability
@@ -1492,7 +1884,12 @@ func (b *Bridge) GetHealth(connectionID string) (*models.HealthInfo, error) {
 		return health, nil
 	}
 
-	if ai, err := ac.JS.AccountInfo(); err == nil && ai != nil {
+	ai, _ := getCached(&ac.cache.mu, &ac.cache.account, b.timeoutConfig.ListCacheTTL, b.timeoutConfig.StreamListTimeout,
+		func() (*gonats.AccountInfo, bool) {
+			ai, err := ac.JS.AccountInfo()
+			return ai, err == nil && ai != nil
+		})
+	if ai != nil {
 		health.JetStream = &models.JetStreamHealth{
 			Memory:         ai.Memory,
 			MemoryLimit:    ai.Limits.MaxMemory,
@@ -1511,8 +1908,16 @@ func (b *Bridge) GetHealth(connectionID string) (*models.HealthInfo, error) {
 	// walking every stream's consumers sequentially on every health poll —
 	// that pattern is what made listing time out in the first place on
 	// deployments with thousands of streams/consumers.
-	allConsumers, err := b.getAllConsumersCached(ac)
-	if err == nil {
+	// Never block the health poll on a cold cache: start the load and report
+	// slow consumers from the next poll.
+	var allConsumers []models.ConsumerInfo
+	haveConsumers := ensureWarm(&ac.cache.mu, &ac.cache.consumers, b.timeoutConfig.ListCacheTTL, b.consumersFetcher(ac))
+	if haveConsumers {
+		var err error
+		allConsumers, err = b.getAllConsumersCached(ac)
+		haveConsumers = err == nil
+	}
+	if haveConsumers {
 		slow := make([]models.SlowConsumer, 0)
 		for _, ci := range allConsumers {
 			reason := ""

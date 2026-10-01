@@ -164,7 +164,7 @@ export function ConsumersView() {
       )}
 
       <div style={{ flex: 1, overflow: 'auto', padding: '16px 28px 20px' }}>
-        {loading && consumers.length === 0 ? (
+        {(loading || !paginatedData) && consumers.length === 0 ? (
           <SkeletonGrid />
         ) : consumers.length === 0 ? (
           <EmptyState search={search} />

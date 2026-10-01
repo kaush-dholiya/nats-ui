@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type CSSProperties } from 'react'
 import {
   Layers, MessageSquare,
   ChevronRight, RefreshCw, Search, X,
@@ -124,7 +124,7 @@ export function StreamsView() {
 
           {/* Grid */}
           <div style={{ flex: 1, overflow: 'auto', padding: '0 28px 20px' }}>
-            {loading && streams.length === 0 ? (
+            {(loading || !paginatedData) && streams.length === 0 ? (
               <StreamGridSkeleton />
             ) : streams.length === 0 ? (
               <div style={{ textAlign: 'center', padding: '80px 20px', color: 'var(--text-dim)' }}>
@@ -376,7 +376,7 @@ function StreamGridRow({ stream, connectionId, onSelect, onDeleted }: {
 
 // ─── Stream Detail ────────────────────────────────────────────────────────────
 
-type DetailTab = 'messages' | 'info'
+type DetailTab = 'messages' | 'consumers' | 'info'
 
 function StreamDetail({ stream, connectionId, onClose }: {
   stream: StreamInfo; connectionId: string; onClose: () => void
@@ -476,7 +476,7 @@ function StreamDetail({ stream, connectionId, onClose }: {
 
         {/* Tabs */}
         <div style={{ display: 'flex', gap: '0', borderBottom: '1px solid var(--border)' }}>
-          {(['messages', 'info'] as DetailTab[]).map(t => (
+          {(['messages', 'consumers', 'info'] as DetailTab[]).map(t => (
             <button key={t} onClick={() => setTab(t)} style={{
               padding: '8px 16px', background: 'none', border: 'none',
               borderBottom: `2px solid ${tab === t ? 'var(--accent)' : 'transparent'}`,
@@ -484,7 +484,7 @@ function StreamDetail({ stream, connectionId, onClose }: {
               cursor: 'pointer', fontSize: '12px', fontWeight: 500,
               fontFamily: 'var(--font-sans)', textTransform: 'capitalize',
               marginBottom: '-1px',
-            }}>{t === 'messages' ? `Messages (${messages.length})` : 'Info'}</button>
+            }}>{t === 'messages' ? `Messages (${messages.length})` : t === 'consumers' ? `Consumers (${stream.consumers})` : 'Info'}</button>
           ))}
         </div>
       </div>
@@ -518,6 +518,8 @@ function StreamDetail({ stream, connectionId, onClose }: {
             connectionId={connectionId}
             streamName={stream.name}
           />
+        ) : tab === 'consumers' ? (
+          <ConsumersTab connectionId={connectionId} streamName={stream.name} />
         ) : (
           <InfoTab stream={stream} />
         )}
@@ -725,6 +727,82 @@ function MessagesTab({ messages, loading, error, limit, setLimit, showFilter, se
             <MessageRow key={idx} msg={msg} connectionId={connectionId} expanded={expandedIdx === idx} onToggle={() => setExpandedIdx(expandedIdx === idx ? null : idx)} />
           ))}
         </div>
+      )}
+    </div>
+  )
+}
+
+type StreamConsumer = {
+  name: string
+  filterSubject?: string
+  pendingMessages: number
+  ackPending: number
+  isPull: boolean
+}
+
+function ConsumersTab({ connectionId, streamName }: { connectionId: string; streamName: string }) {
+  const [consumers, setConsumers] = useState<StreamConsumer[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      setConsumers(await api.getConsumers(connectionId, streamName))
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load consumers')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { setConsumers(null); load() }, [streamName, connectionId])
+
+  const cell: CSSProperties = { padding: '9px 10px', borderBottom: '1px solid var(--border-subtle)', fontSize: '12px' }
+  const head: CSSProperties = { ...cell, textAlign: 'left', color: 'var(--text-dim)', fontWeight: 500, fontSize: '11px' }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '10px' }}>
+        <button onClick={load} disabled={loading} style={{
+          background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: '7px',
+          padding: '6px', cursor: 'pointer', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center',
+        }}>
+          <RefreshCw size={13} style={{ animation: loading ? 'spin 0.8s linear infinite' : 'none' }} />
+        </button>
+      </div>
+      {error ? (
+        <p style={{ fontSize: '12px', color: 'var(--red, #ef4444)' }}>{error}</p>
+      ) : consumers === null ? (
+        <p style={{ fontSize: '12px', color: 'var(--text-dim)' }}>Loading consumers…</p>
+      ) : consumers.length === 0 ? (
+        <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>No consumers attached to this stream</p>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              <th style={head}>Consumer</th>
+              <th style={head}>Type</th>
+              <th style={head}>Filter subject</th>
+              <th style={{ ...head, textAlign: 'right' }}>Lag (pending)</th>
+              <th style={{ ...head, textAlign: 'right' }}>Ack pending</th>
+            </tr>
+          </thead>
+          <tbody>
+            {consumers.map(c => (
+              <tr key={c.name}>
+                <td style={{ ...cell, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{c.name}</td>
+                <td style={{ ...cell, color: 'var(--text-secondary)' }}>{c.isPull ? 'Pull' : 'Push'}</td>
+                <td style={{ ...cell, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{c.filterSubject || '—'}</td>
+                <td style={{ ...cell, textAlign: 'right', fontFamily: 'var(--font-mono)', color: c.pendingMessages > 0 ? 'var(--accent)' : 'var(--text-secondary)' }}>
+                  {c.pendingMessages.toLocaleString()}
+                </td>
+                <td style={{ ...cell, textAlign: 'right', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{c.ackPending.toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </div>
   )
@@ -1047,7 +1125,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   )
 }
 
-const actionBtnStyle = (color: string): React.CSSProperties => ({
+const actionBtnStyle = (color: string): CSSProperties => ({
   display: 'flex', alignItems: 'center', gap: '6px',
   padding: '7px 13px', borderRadius: '7px',
   background: `${color}15`, border: `1px solid ${color}30`, color,
@@ -1055,18 +1133,18 @@ const actionBtnStyle = (color: string): React.CSSProperties => ({
   fontFamily: 'var(--font-sans)', transition: 'all 0.15s',
 })
 
-const labelStyle: React.CSSProperties = {
+const labelStyle: CSSProperties = {
   fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 600,
   display: 'block', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.3px',
 }
 
-const inputStyle: React.CSSProperties = {
+const inputStyle: CSSProperties = {
   width: '100%', padding: '6px 10px',
   background: 'var(--bg-elevated)', border: '1px solid var(--border)',
   borderRadius: '6px', color: 'var(--text-primary)', fontSize: '12px',
   fontFamily: 'var(--font-sans)', outline: 'none', height: '32px',
 }
 
-const selectStyle: React.CSSProperties = {
+const selectStyle: CSSProperties = {
   ...inputStyle, cursor: 'pointer', appearance: 'none' as any,
 }
