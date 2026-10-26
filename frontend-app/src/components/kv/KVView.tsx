@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { Database, RefreshCw, Search, Plus, Trash2, Copy, Check, Layers } from 'lucide-react'
 import { useStore } from '../../stores/appStore'
 import { api } from '../../lib/api'
@@ -89,7 +89,7 @@ export function KVView() {
 
   if (selectedBucket) {
     return (
-      <div style={{ height: '100vh', overflow: 'hidden' }}>
+      <div style={{ height: '100vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <KVBucketDetail bucket={selectedBucket} onClose={() => setSelectedBucket(null)} onDelete={handleDeleteBucket} />
       </div>
     )
@@ -203,6 +203,29 @@ function KVBucketDetail({ bucket, onClose, onDelete }: { bucket: string; onClose
   const [showAddEntry, setShowAddEntry] = useState(false)
   const [newKey, setNewKey] = useState('')
   const [newValue, setNewValue] = useState('')
+  const [colWidths, setColWidths] = useState({ key: 300, value: 400, created: 180 })
+  const cols = `${colWidths.key}px minmax(${colWidths.value}px, 1fr) ${colWidths.created}px 200px`
+  const resizeCol = (col: 'key' | 'value' | 'created', width: number) =>
+    setColWidths(w => ({ ...w, [col]: Math.max(80, width) }))
+  const [lookupKey, setLookupKey] = useState('')
+  const [lookupLoading, setLookupLoading] = useState(false)
+  const [lookupError, setLookupError] = useState('')
+  const [lookupResult, setLookupResult] = useState<any | null>(null)
+
+  const handleLookup = async () => {
+    const key = lookupKey.trim()
+    if (!key || !session?.connectionId) return
+    setLookupLoading(true)
+    setLookupError('')
+    setLookupResult(null)
+    try {
+      setLookupResult(await api.getKVValue(session.connectionId, bucket, key))
+    } catch (err: any) {
+      setLookupError(err.message || 'Failed to get key')
+    } finally {
+      setLookupLoading(false)
+    }
+  }
 
   const loadEntries = async (searchQuery: string, pageOffset: number) => {
     if (!session?.connectionId) return
@@ -257,8 +280,8 @@ function KVBucketDetail({ bucket, onClose, onDelete }: { bucket: string; onClose
   const total = data?.total ?? 0
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', backgroundColor: 'var(--bg-base)' }}>
-      <div style={{ padding: '20px 24px 0', flexShrink: 0 }}>
+    <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', backgroundColor: 'var(--bg-base)' }}>
+      <div style={{ padding: '20px 24px 0', flexShrink: 0, maxHeight: '60%', overflow: 'auto' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
           <h2 style={{ fontSize: '16px', fontWeight: 600 }}>{bucket}</h2>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)' }}>✕</button>
@@ -277,24 +300,44 @@ function KVBucketDetail({ bucket, onClose, onDelete }: { bucket: string; onClose
           </button>
         </div>
 
+        <div style={{ display: 'flex', gap: '8px', marginBottom: lookupResult || lookupError ? '8px' : '14px' }}>
+          <input
+            value={lookupKey} onChange={e => setLookupKey(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') handleLookup() }}
+            placeholder="Get value by exact key…"
+            style={{ flex: 1, padding: '8px 10px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: '7px', color: 'var(--text-primary)', fontSize: '12px', fontFamily: 'var(--font-mono)', outline: 'none' }}
+          />
+          <button onClick={handleLookup} disabled={lookupLoading || !lookupKey.trim()} style={{ background: 'var(--accent-glow)', border: '1px solid rgba(59,130,246,0.3)', borderRadius: '7px', padding: '7px 13px', cursor: 'pointer', color: 'var(--accent)', fontSize: '12px', fontWeight: 500, opacity: lookupLoading || !lookupKey.trim() ? 0.5 : 1 }}>
+            {lookupLoading ? 'Getting…' : 'Get Value'}
+          </button>
+        </div>
+        {lookupError && (
+          <p style={{ color: 'var(--red)', fontSize: '12px', marginBottom: '14px' }}>{lookupError}</p>
+        )}
+        {lookupResult && (
+          <div style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: '7px', padding: '10px 12px', marginBottom: '14px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-dim)', marginBottom: '6px' }}>
+              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{lookupResult.key}</span>
+              <span>rev {lookupResult.revision} · {lookupResult.bytes} B · {new Date(lookupResult.timestamp).toLocaleString()}</span>
+            </div>
+            <pre style={{ margin: 0, fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: '200px', overflow: 'auto' }}>{lookupResult.value}</pre>
+          </div>
+        )}
+
         <div style={{ position: 'relative', marginBottom: '14px' }}>
           <Search size={13} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
           <input value={search} onChange={e => handleSearch(e.target.value)} placeholder="Search keys…" style={{ width: '100%', padding: '8px 10px 8px 30px', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: '7px', color: 'var(--text-primary)', fontSize: '12px', fontFamily: 'var(--font-sans)', outline: 'none' }} />
         </div>
       </div>
 
-      <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
         {loading ? (
-          <>
-            <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr 120px', gap: '0', borderBottom: '1px solid var(--border)', padding: '0 16px', position: 'sticky', top: 0, background: 'var(--bg-surface)', zIndex: 10 }}>
-              <div style={{ padding: '12px 0', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Key</div>
-              <div style={{ padding: '12px 12px', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Value</div>
-              <div style={{ padding: '12px 0', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', textAlign: 'center' }}>Action</div>
-            </div>
-            <div style={{ flex: 1, overflow: 'auto' }}>
+          <div style={{ width: 'max-content', minWidth: '100%' }}>
+            <KVHeader cols={cols} widths={colWidths} onResize={resizeCol} />
+            <div>
               {[...Array(8)].map((_, i) => (
                 <div key={i} style={{
-                  display: 'grid', gridTemplateColumns: '300px 1fr 120px', gap: '0',
+                  display: 'grid', gridTemplateColumns: cols, gap: '0',
                   borderBottom: '1px solid var(--border-subtle)',
                   background: i % 2 === 0 ? 'transparent' : 'rgba(59,130,246,0.02)',
                   padding: '12px 16px', alignItems: 'center',
@@ -310,29 +353,29 @@ function KVBucketDetail({ bucket, onClose, onDelete }: { bucket: string; onClose
                   }} />
                   <div style={{
                     height: '12px', background: 'var(--border)', borderRadius: '3px',
+                    width: '120px', marginLeft: '0', animation: 'pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                  }} />
+                  <div style={{
+                    height: '12px', background: 'var(--border)', borderRadius: '3px',
                     width: '40px', marginLeft: 'auto', animation: 'pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite',
                   }} />
                 </div>
               ))}
             </div>
-          </>
+          </div>
         ) : entries.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-dim)' }}>
             <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{search ? 'No entries match' : 'No entries in bucket'}</p>
           </div>
         ) : (
-          <>
-            <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr 120px', gap: '0', borderBottom: '1px solid var(--border)', padding: '0 16px', position: 'sticky', top: 0, background: 'var(--bg-surface)', zIndex: 10 }}>
-              <div style={{ padding: '12px 0', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Key</div>
-              <div style={{ padding: '12px 12px', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Value</div>
-              <div style={{ padding: '12px 0', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', textAlign: 'center' }}>Action</div>
-            </div>
-            <div style={{ flex: 1, overflow: 'auto' }}>
+          <div style={{ width: 'max-content', minWidth: '100%' }}>
+            <KVHeader cols={cols} widths={colWidths} onResize={resizeCol} />
+            <div>
               {entries.map((entry, idx) => (
-                <KVEntryRow key={entry.key} entry={entry} idx={idx} onDelete={handleDeleteEntry} />
+                <KVEntryRow key={entry.key} entry={entry} idx={idx} cols={cols} onDelete={handleDeleteEntry} />
               ))}
             </div>
-          </>
+          </div>
         )}
       </div>
 
@@ -353,7 +396,49 @@ function KVBucketDetail({ bucket, onClose, onDelete }: { bucket: string; onClose
   )
 }
 
-function KVEntryRow({ entry, idx, onDelete }: { entry: any; idx: number; onDelete: (key: string) => void }) {
+const headCell = { position: 'relative', padding: '12px 0', fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px', whiteSpace: 'nowrap' } as const
+
+function KVHeader({ cols, widths, onResize }: {
+  cols: string
+  widths: { key: number; value: number; created: number }
+  onResize: (col: 'key' | 'value' | 'created', width: number) => void
+}) {
+  const startDrag = (col: 'key' | 'value' | 'created') => (e: ReactMouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = widths[col]
+    const move = (ev: MouseEvent) => onResize(col, startW + ev.clientX - startX)
+    const up = () => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
+  const handle = (col: 'key' | 'value' | 'created') => (
+    <div
+      onMouseDown={startDrag(col)}
+      title="Drag to resize"
+      style={{ position: 'absolute', top: 0, right: 0, width: '8px', height: '100%', cursor: 'col-resize', borderRight: '2px solid var(--border)' }}
+      onMouseEnter={e => (e.currentTarget.style.borderRightColor = 'var(--accent)')}
+      onMouseLeave={e => (e.currentTarget.style.borderRightColor = 'var(--border)')}
+    />
+  )
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 0, borderBottom: '1px solid var(--border)', padding: '0 16px', position: 'sticky', top: 0, background: 'var(--bg-surface)', zIndex: 10 }}>
+      <div style={headCell}>Key{handle('key')}</div>
+      <div style={{ ...headCell, paddingLeft: '12px' }}>Value{handle('value')}</div>
+      <div style={headCell}>Created At{handle('created')}</div>
+      <div style={{ ...headCell, textAlign: 'center' }}>Action</div>
+    </div>
+  )
+}
+
+function KVEntryRow({ entry, idx, cols, onDelete }: { entry: any; idx: number; cols: string; onDelete: (key: string) => void }) {
   const [copied, setCopied] = useState(false)
   const [hoveredRow, setHoveredRow] = useState(false)
 
@@ -369,7 +454,7 @@ function KVEntryRow({ entry, idx, onDelete }: { entry: any; idx: number; onDelet
     <div
       style={{
         display: 'grid',
-        gridTemplateColumns: '300px 1fr 200px',
+        gridTemplateColumns: cols,
         gap: '0',
         borderBottom: '1px solid var(--border-subtle)',
         background: hoveredRow ? 'rgba(59,130,246,0.08)' : (idx % 2 === 0 ? 'transparent' : 'rgba(59,130,246,0.02)'),
@@ -379,12 +464,16 @@ function KVEntryRow({ entry, idx, onDelete }: { entry: any; idx: number; onDelet
       onMouseEnter={() => setHoveredRow(true)}
       onMouseLeave={() => setHoveredRow(false)}
     >
-      <div style={{ padding: '12px 16px', fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--accent)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center' }}>
+      <div style={{ padding: '12px 16px', fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--accent)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center' }} title={entry.key}>
         {entry.key}
       </div>
 
       <div style={{ padding: '12px 12px', fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', cursor: 'pointer', userSelect: 'none' }} title={`Click to copy: ${entry.value}`} onClick={copyValue}>
         {displayValue}
+      </div>
+
+      <div style={{ padding: '12px 0', fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }} title={entry.timestamp ? new Date(entry.timestamp).toISOString() : ''}>
+        {entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '—'}
       </div>
 
       <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '8px', justifyContent: 'flex-start', opacity: hoveredRow ? 1 : 0.4, transition: 'opacity 0.15s' }}>

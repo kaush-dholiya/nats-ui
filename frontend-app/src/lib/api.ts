@@ -67,11 +67,11 @@ export const api = {
     req<void>(`/connections/${id}/streams/${stream}`, { method: 'DELETE' }),
   purgeStream: (id: string, stream: string) =>
     req<void>(`/connections/${id}/streams/${stream}/purge`, { method: 'POST' }),
-  getStreamMessages: (id: string, stream: string, limit: number, contentFilter?: ContentFilter, startSeq?: number, endSeq?: number, startTime?: number, endTime?: number) =>
+  getStreamMessages: (id: string, stream: string, limit: number, contentFilter?: ContentFilter, subjectFilter?: string, startSeq?: number, endSeq?: number, startTime?: number, endTime?: number) =>
     req<MessageEnvelope[]>(`/connections/${id}/streams/${stream}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ limit, contentFilter, startSeq: startSeq || 0, endSeq: endSeq || 0, startTime: startTime || 0, endTime: endTime || 0 }),
-    }),
+      body: JSON.stringify({ limit, contentFilter, subjectFilter: subjectFilter || '', startSeq: startSeq || 0, endSeq: endSeq || 0, startTime: startTime || 0, endTime: endTime || 0 }),
+    }, 330),
   replayStreamMessages: (
     id: string, stream: string,
     opts: { targetSubject?: string; startSeq?: number; endSeq?: number; startTime?: number; endTime?: number; delayMs?: number; limit?: number }
@@ -122,6 +122,8 @@ export const api = {
     if (search) params.append('search', search)
     return req<{ entries: any[]; total: number; offset: number; limit: number }>(`/connections/${id}/kv/${bucket}?${params}`)
   },
+  getKVValue: (id: string, bucket: string, key: string) =>
+    req<{ key: string; value: string; bytes: number; timestamp: number; revision: number }>(`/connections/${id}/kv/${bucket}/${encodeURIComponent(key)}`),
   putKV: (id: string, bucket: string, key: string, value: string) =>
     req<void>(`/connections/${id}/kv/${bucket}`, { method: 'POST', body: JSON.stringify({ key, value }) }),
   deleteKV: (id: string, bucket: string, key: string) =>

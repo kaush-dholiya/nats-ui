@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 
 	"nats-ui/models"
 	natsBridge "nats-ui/nats"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
+	gonats "github.com/nats-io/nats.go"
 )
 
 type Handler struct {
@@ -41,6 +43,7 @@ func (h *Handler) RegisterRoutes(app *fiber.App) {
 	api.Post("/connections/:id/kv", h.createKVBucketHandler)
 	api.Get("/connections/:id/kv", h.getKVBucketsHandler)
 	api.Get("/connections/:id/kv/:bucket", h.getKVEntriesHandler)
+	api.Get("/connections/:id/kv/:bucket/:key", h.getKVValueHandler)
 	api.Post("/connections/:id/kv/:bucket", h.putKVHandler)
 	api.Delete("/connections/:id/kv/:bucket/:key", h.deleteKVHandler)
 	api.Delete("/connections/:id/kv/:bucket", h.deleteKVBucketHandler)
@@ -203,15 +206,16 @@ func (h *Handler) getStreamMessages(c *fiber.Ctx) error {
 	var req struct {
 		Limit         int                   `json:"limit"`
 		ContentFilter *models.ContentFilter `json:"contentFilter"`
-		StartSeq      uint64                `json:"startSeq"`  // Start sequence (0 = no filter)
-		EndSeq        uint64                `json:"endSeq"`    // End sequence (0 = no filter)
-		StartTime     int64                 `json:"startTime"` // Start timestamp in ms (0 = no filter)
-		EndTime       int64                 `json:"endTime"`   // End timestamp in ms (0 = no filter)
+		SubjectFilter string                `json:"subjectFilter"` // NATS wildcard filter on message subject
+		StartSeq      uint64                `json:"startSeq"`      // Start sequence (0 = no filter)
+		EndSeq        uint64                `json:"endSeq"`        // End sequence (0 = no filter)
+		StartTime     int64                 `json:"startTime"`     // Start timestamp in ms (0 = no filter)
+		EndTime       int64                 `json:"endTime"`       // End timestamp in ms (0 = no filter)
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 	}
-	msgs, err := h.bridge.GetStreamMessages(c.Params("id"), c.Params("stream"), req.Limit, req.ContentFilter, req.StartSeq, req.EndSeq, req.StartTime, req.EndTime)
+	msgs, err := h.bridge.GetStreamMessages(c.Params("id"), c.Params("stream"), req.Limit, req.ContentFilter, req.SubjectFilter, req.StartSeq, req.EndSeq, req.StartTime, req.EndTime)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -393,6 +397,17 @@ func (h *Handler) getKVEntriesHandler(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(result)
+}
+
+func (h *Handler) getKVValueHandler(c *fiber.Ctx) error {
+	entry, err := h.bridge.GetKVValue(c.Params("id"), c.Params("bucket"), c.Params("key"))
+	if err != nil {
+		if errors.Is(err, gonats.ErrKeyNotFound) {
+			return c.Status(404).JSON(fiber.Map{"error": "key not found"})
+		}
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(entry)
 }
 
 func (h *Handler) putKVHandler(c *fiber.Ctx) error {

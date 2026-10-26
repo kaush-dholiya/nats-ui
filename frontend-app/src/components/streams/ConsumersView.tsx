@@ -25,20 +25,6 @@ interface Consumer {
   pausedUntil?: string
 }
 
-// Matches a NATS subject against a filter subject containing `*` / `>` wildcards.
-function subjectMatches(subject: string, filter: string): boolean {
-  if (!filter) return true
-  const subTokens = subject.split('.')
-  const filTokens = filter.split('.')
-  for (let i = 0; i < filTokens.length; i++) {
-    const f = filTokens[i]
-    if (f === '>') return true
-    if (i >= subTokens.length) return false
-    if (f !== '*' && f !== subTokens[i]) return false
-  }
-  return subTokens.length === filTokens.length
-}
-
 export function ConsumersView() {
   const { session, streams, loadStreams } = useStore()
   const [admin, setAdmin] = useState<{ edit?: Consumer } | null>(null)
@@ -487,11 +473,9 @@ function ConsumerDetail({ consumer, connectionId, onClose }: {
     try {
       const startSeqNum = startSeq ? parseInt(startSeq, 10) : undefined
       const endSeqNum = endSeq ? parseInt(endSeq, 10) : undefined
-      const msgs = await api.getStreamMessages(connectionId, consumer.streamName, limit, undefined, startSeqNum, endSeqNum)
-      const filtered = scopeToFilter && consumer.filterSubject
-        ? (msgs ?? []).filter(m => subjectMatches(m.subject, consumer.filterSubject))
-        : (msgs ?? [])
-      setMessages(filtered)
+      const subjectFilter = scopeToFilter ? consumer.filterSubject : undefined
+      const msgs = await api.getStreamMessages(connectionId, consumer.streamName, limit, undefined, subjectFilter, startSeqNum, endSeqNum)
+      setMessages(msgs ?? [])
     } catch (e: any) {
       setError(e.message)
       setMessages([])

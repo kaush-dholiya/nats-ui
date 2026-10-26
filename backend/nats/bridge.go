@@ -48,7 +48,7 @@ type listCache struct {
 	streams   cacheEntry[[]models.StreamInfo]
 	consumers cacheEntry[[]models.ConsumerInfo]
 	account   cacheEntry[*gonats.AccountInfo]
-	kvEntries map[string]*cacheEntry[[]models.KVEntry]
+	kvEntries map[string]*cacheEntry[[]string]
 }
 
 // invalidate drops cached data so the next read fetches fresh. Called after
@@ -87,15 +87,15 @@ func (c *listCache) invalidateKV(bucket string) {
 	c.streams.gen++
 }
 
-func (c *listCache) kvEntry(bucket string) *cacheEntry[[]models.KVEntry] {
+func (c *listCache) kvEntry(bucket string) *cacheEntry[[]string] {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.kvEntries == nil {
-		c.kvEntries = make(map[string]*cacheEntry[[]models.KVEntry])
+		c.kvEntries = make(map[string]*cacheEntry[[]string])
 	}
 	e, ok := c.kvEntries[bucket]
 	if !ok {
-		e = &cacheEntry[[]models.KVEntry]{}
+		e = &cacheEntry[[]string]{}
 		c.kvEntries[bucket] = e
 	}
 	return e
@@ -803,8 +803,36 @@ func (b *Bridge) GetConsumersPaginated(connectionID string, offset, limit int, s
 	}, nil
 }
 
-// GetStreamMessages fetches stored messages from a JetStream stream (not live subscribe)
-func (b *Bridge) GetStreamMessages(connectionID, streamName string, limit int, filter *models.ContentFilter, startSeq, endSeq uint64, startTime, endTime int64) ([]models.MessageEnvelope, error) {
+// subjectMatchesFilter reports whether subject matches a NATS-style filter
+// (`*` = one token, `>` = one or more trailing tokens). An empty filter matches all.
+func subjectMatchesFilter(subject, filter string) bool {
+	if filter == "" || filter == ">" {
+		return true
+	}
+	st := strings.Split(subject, ".")
+	ft := strings.Split(filter, ".")
+	for i, f := range ft {
+		if f == ">" {
+			return len(st) > i
+		}
+		if i >= len(st) {
+			return false
+		}
+		if f != "*" && f != st[i] {
+			return false
+		}
+	}
+	return len(st) == len(ft)
+}
+
+// GetStreamMessages fetches stored messages from a JetStream stream (not live subscribe).
+//
+// Without a start sequence/time it scans the stream backwards from the newest message
+// (or endSeq) and returns the last `limit` messages that match the subject and content
+// filters, so filters are applied to the whole stream rather than a recent window.
+// With a start sequence/time it reads forward from that point and returns the first
+// `limit` matches. Results are always returned oldest first.
+func (b *Bridge) GetStreamMessages(connectionID, streamName string, limit int, filter *models.ContentFilter, subjectFilter string, startSeq, endSeq uint64, startTime, endTime int64) ([]models.MessageEnvelope, error) {
 	b.mu.RLock()
 	ac, ok := b.connections[connectionID]
 	b.mu.RUnlock()
@@ -820,113 +848,204 @@ func (b *Bridge) GetStreamMessages(connectionID, streamName string, limit int, f
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
+	subjectFilter = strings.TrimSpace(subjectFilter)
 
 	filterEngine, err := NewContentFilterEngine(filter)
 	if err != nil {
 		return nil, fmt.Errorf("invalid content filter: %w", err)
 	}
 
-	// Get stream info to find total messages
 	si, err := ac.JS.StreamInfo(streamName)
 	if err != nil {
 		return nil, fmt.Errorf("stream not found: %w", err)
 	}
 
 	results := make([]models.MessageEnvelope, 0)
-
 	if si.State.Msgs == 0 {
 		return results, nil
 	}
 
-	// Determine start sequence based on filters
-	var calcStartSeq uint64
-	if startSeq > 0 {
-		// User specified a start sequence
-		calcStartSeq = startSeq
-	} else if startTime > 0 {
-		// User specified a start time — we'll filter by timestamp instead
-		calcStartSeq = si.State.FirstSeq
-	} else {
-		// No sequence/time filter — read last N messages
-		fetchCount := uint64(limit * 5)
-		if si.State.Msgs <= fetchCount {
-			calcStartSeq = si.State.FirstSeq
-		} else {
-			calcStartSeq = si.State.LastSeq - fetchCount + 1
-		}
-	}
-
-	// Pick subject — ordered consumer needs a subject
-	subject := ">"
-	if len(si.Config.Subjects) > 0 {
-		subject = si.Config.Subjects[0]
-	}
-
-	sub, err := ac.JS.SubscribeSync(
-		subject,
-		gonats.BindStream(streamName),
-		gonats.StartSequence(calcStartSeq),
-		gonats.OrderedConsumer(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create consumer: %w", err)
-	}
-	defer sub.Unsubscribe()
-
 	deadline := time.Now().Add(b.timeoutConfig.MessageFetchTimeout)
-	for len(results) < limit && time.Now().Before(deadline) {
-		msg, err := sub.NextMsg(500 * time.Millisecond)
-		if err != nil {
-			break
-		}
 
-		meta, _ := msg.Metadata()
-		seq := uint64(0)
-		ts := time.Now().UnixMilli()
-		if meta != nil {
-			seq = meta.Sequence.Stream
-			ts = meta.Timestamp.UnixMilli()
-		}
-
-		// Apply sequence filters
+	// accept applies the range, subject and content filters. It returns the envelope on a match.
+	accept := func(subject string, data []byte, hdr gonats.Header, seq uint64, ts int64) (models.MessageEnvelope, bool) {
 		if startSeq > 0 && seq < startSeq {
-			continue
+			return models.MessageEnvelope{}, false
 		}
 		if endSeq > 0 && seq > endSeq {
-			continue
+			return models.MessageEnvelope{}, false
 		}
-
-		// Apply time filters (convert ms to timestamps)
 		if startTime > 0 && ts < startTime {
-			continue
+			return models.MessageEnvelope{}, false
 		}
 		if endTime > 0 && ts > endTime {
-			continue
+			return models.MessageEnvelope{}, false
 		}
-
-		// Apply content filter
-		matched, matchPath := filterEngine.Match(msg.Data)
+		if !subjectMatchesFilter(subject, subjectFilter) {
+			return models.MessageEnvelope{}, false
+		}
+		matched, matchPath := filterEngine.Match(data)
 		if !matched {
-			continue
+			return models.MessageEnvelope{}, false
 		}
-
 		headers := make(map[string]string)
-		for k := range msg.Header {
-			headers[k] = msg.Header.Get(k)
+		for k := range hdr {
+			headers[k] = hdr.Get(k)
 		}
-
-		results = append(results, models.MessageEnvelope{
-			Subject:   msg.Subject,
-			Payload:   string(msg.Data),
+		return models.MessageEnvelope{
+			Subject:   subject,
+			Payload:   string(data),
 			Headers:   headers,
 			Timestamp: ts,
 			Sequence:  seq,
 			Matched:   true,
 			MatchPath: matchPath,
-		})
+		}, true
 	}
 
-	return results, nil
+	top := si.State.LastSeq
+	if endSeq > 0 && endSeq < top {
+		top = endSeq
+	}
+	first := si.State.FirstSeq
+
+	// forwardScan reads forward from `from` through an ordered consumer. The server applies
+	// the subject filter, so only matching messages cross the wire.
+	//   lastN=false: stop after the first `limit` matches (used with an explicit start)
+	//   lastN=true : read through to `top` and keep the last `limit` matches
+	forwardScan := func(from uint64, startAt *time.Time, lastN bool) ([]models.MessageEnvelope, error) {
+		opts := []gonats.SubOpt{gonats.BindStream(streamName), gonats.OrderedConsumer()}
+		if startAt != nil {
+			opts = append(opts, gonats.StartTime(*startAt))
+		} else {
+			opts = append(opts, gonats.StartSequence(from))
+		}
+		// An empty subject means no consumer filter: every subject in the stream.
+		sub, err := ac.JS.SubscribeSync(subjectFilter, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create consumer: %w", err)
+		}
+		defer sub.Unsubscribe()
+
+		out := make([]models.MessageEnvelope, 0)
+		for lastN || len(out) < limit {
+			if !time.Now().Before(deadline) {
+				if lastN {
+					return nil, fmt.Errorf("scan timed out before reaching the end of the stream; set a start sequence/time to narrow the search")
+				}
+				break
+			}
+			msg, err := sub.NextMsg(5 * time.Second)
+			if err != nil {
+				break
+			}
+			meta, _ := msg.Metadata()
+			seq := uint64(0)
+			ts := time.Now().UnixMilli()
+			var pending uint64
+			if meta != nil {
+				seq = meta.Sequence.Stream
+				ts = meta.Timestamp.UnixMilli()
+				pending = meta.NumPending
+			}
+			if seq > top {
+				break
+			}
+			if env, ok := accept(msg.Subject, msg.Data, msg.Header, seq, ts); ok {
+				out = append(out, env)
+				if lastN && len(out) > limit {
+					out = out[1:]
+				}
+			}
+			if seq >= top || pending == 0 {
+				break
+			}
+		}
+		return out, nil
+	}
+
+	// Explicit start sequence/time: first `limit` matches from that point.
+	if startSeq > 0 || startTime > 0 {
+		if startSeq > 0 {
+			return forwardScan(startSeq, nil, false)
+		}
+		t := time.UnixMilli(startTime)
+		return forwardScan(0, &t, false)
+	}
+
+	// A subject filter can match anywhere in the stream, so let the server do the filtering.
+	if subjectFilter != "" {
+		return forwardScan(first, nil, true)
+	}
+
+	// ── Backward scan: newest messages first, stop once `limit` matches are found ──
+	// Cheap when matches are common. If the content filter is rare and the scan budget is
+	// used up, fall back to a single forward pass over the whole stream (much faster per message).
+	const batch = 32
+	const scanBudget = 20000
+	scanned := 0
+
+	type fetched struct {
+		msg *gonats.RawStreamMsg
+		err error
+	}
+
+	for hi := top; hi >= first && hi > 0 && len(results) < limit && time.Now().Before(deadline); {
+		if scanned >= scanBudget {
+			return forwardScan(first, nil, true)
+		}
+		lo := first
+		if hi-first+1 > batch {
+			lo = hi - batch + 1
+		}
+		scanned += int(hi - lo + 1)
+		out := make([]fetched, hi-lo+1)
+		var wg sync.WaitGroup
+		for seq := lo; seq <= hi; seq++ {
+			wg.Add(1)
+			go func(seq uint64) {
+				defer wg.Done()
+				var m *gonats.RawStreamMsg
+				var err error
+				for attempt := 0; attempt < 3; attempt++ {
+					m, err = ac.JS.GetMsg(streamName, seq, gonats.MaxWait(15*time.Second))
+					if err == nil || err == gonats.ErrMsgNotFound {
+						break
+					}
+				}
+				out[seq-lo] = fetched{m, err}
+			}(seq)
+		}
+		wg.Wait()
+
+		// newest first within the batch
+		for seq := hi; seq >= lo && len(results) < limit; seq-- {
+			f := out[seq-lo]
+			if f.err != nil {
+				if f.err == gonats.ErrMsgNotFound {
+					continue // deleted / purged sequence
+				}
+				return nil, fmt.Errorf("failed to read message %d: %w", seq, f.err)
+			}
+			ts := f.msg.Time.UnixMilli()
+			if env, ok := accept(f.msg.Subject, f.msg.Data, f.msg.Header, f.msg.Sequence, ts); ok {
+				results = append(results, env)
+			}
+		}
+		if lo == first {
+			break
+		}
+		hi = lo - 1
+	}
+
+	return reverseEnvelopes(results), nil
+}
+
+func reverseEnvelopes(in []models.MessageEnvelope) []models.MessageEnvelope {
+	for i, j := 0, len(in)-1; i < j; i, j = i+1, j-1 {
+		in[i], in[j] = in[j], in[i]
+	}
+	return in
 }
 
 func (b *Bridge) ReplayStreamMessages(connectionID, streamName string, req models.ReplayRequest) (*models.ReplayResult, error) {
@@ -1795,20 +1914,52 @@ func (b *Bridge) GetKVBucketsPaginated(connectionID string, offset, limit int, s
 // kvFetchWorkers bounds concurrent kv.Get calls when loading a bucket.
 const kvFetchWorkers = 20
 
-// fetchKVEntries loads every live entry of a bucket using a worker pool. The
-// bool reports whether all keys were read successfully.
-func fetchKVEntries(kv gonats.KeyValue) ([]models.KVEntry, bool) {
+// fetchKVKeys lists the live keys of a bucket. Values are not read here so
+// large buckets load quickly; they are fetched per page. The bool reports
+// whether the listing succeeded.
+func fetchKVKeys(kv gonats.KeyValue) ([]string, bool) {
 	keys, err := kv.Keys()
 	if err != nil {
 		if err == gonats.ErrNoKeysFound {
-			return []models.KVEntry{}, true
+			return []string{}, true
 		}
-		return []models.KVEntry{}, false
+		return []string{}, false
 	}
+	sort.Strings(keys)
+	return keys, true
+}
 
-	jobs := make(chan string, len(keys))
-	for _, k := range keys {
-		jobs <- k
+// kvEntryFor reads one key into a KVEntry, retrying transient errors.
+func kvEntryFor(kv gonats.KeyValue, key string) (models.KVEntry, error) {
+	var entry gonats.KeyValueEntry
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		entry, err = kv.Get(key)
+		if err == nil || err == gonats.ErrKeyNotFound {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+	}
+	if err != nil {
+		return models.KVEntry{}, err
+	}
+	return models.KVEntry{
+		Key:       key,
+		Value:     string(entry.Value()),
+		Bytes:     len(entry.Value()),
+		Timestamp: entry.Created().UnixMilli(),
+		Revision:  entry.Revision(),
+		Operation: "PUT",
+	}, nil
+}
+
+// fetchKVPage reads the values of the given keys with a worker pool,
+// preserving key order. Keys deleted since listing are skipped.
+func fetchKVPage(kv gonats.KeyValue, keys []string) []models.KVEntry {
+	results := make([]*models.KVEntry, len(keys))
+	jobs := make(chan int, len(keys))
+	for i := range keys {
+		jobs <- i
 	}
 	close(jobs)
 
@@ -1816,62 +1967,64 @@ func fetchKVEntries(kv gonats.KeyValue) ([]models.KVEntry, bool) {
 	if workers > len(keys) {
 		workers = len(keys)
 	}
-
-	var (
-		mu         sync.Mutex
-		wg         sync.WaitGroup
-		entries    = make([]models.KVEntry, 0, len(keys))
-		incomplete bool
-	)
+	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for key := range jobs {
-				var entry gonats.KeyValueEntry
-				var err error
-				for attempt := 0; attempt < 3; attempt++ {
-					entry, err = kv.Get(key)
-					if err == nil || err == gonats.ErrKeyNotFound {
-						break
-					}
-					time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+			for idx := range jobs {
+				if en, err := kvEntryFor(kv, keys[idx]); err == nil {
+					results[idx] = &en
 				}
-				mu.Lock()
-				switch {
-				case err == nil:
-					entries = append(entries, models.KVEntry{
-						Key:       key,
-						Value:     string(entry.Value()),
-						Bytes:     len(entry.Value()),
-						Timestamp: entry.Created().UnixMilli(),
-						Revision:  entry.Revision(),
-						Operation: "PUT",
-					})
-				case err != gonats.ErrKeyNotFound: // not-found means deleted since Keys()
-					incomplete = true
-				}
-				mu.Unlock()
 			}
 		}()
 	}
 	wg.Wait()
 
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
-	return entries, !incomplete
+	entries := make([]models.KVEntry, 0, len(keys))
+	for _, r := range results {
+		if r != nil {
+			entries = append(entries, *r)
+		}
+	}
+	return entries
 }
 
-func (b *Bridge) GetKVEntriesPaginated(connectionID, bucketName string, offset, limit int, searchFilter string) (*models.PaginatedKVEntries, error) {
+func (b *Bridge) kvBucket(connectionID, bucketName string) (*ActiveConnection, gonats.KeyValue, error) {
 	b.mu.RLock()
 	ac, ok := b.connections[connectionID]
 	b.mu.RUnlock()
 
 	if !ok {
-		return nil, fmt.Errorf("not connected")
+		return nil, nil, fmt.Errorf("not connected")
 	}
-
 	if ac.JS == nil {
-		return nil, fmt.Errorf("JetStream not available")
+		return nil, nil, fmt.Errorf("JetStream not available")
+	}
+	kv, err := ac.JS.KeyValue(bucketName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get KV bucket: %w", err)
+	}
+	return ac, kv, nil
+}
+
+// GetKVValue returns a single key of a bucket.
+func (b *Bridge) GetKVValue(connectionID, bucketName, key string) (*models.KVEntry, error) {
+	_, kv, err := b.kvBucket(connectionID, bucketName)
+	if err != nil {
+		return nil, err
+	}
+	entry, err := kvEntryFor(kv, key)
+	if err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
+func (b *Bridge) GetKVEntriesPaginated(connectionID, bucketName string, offset, limit int, searchFilter string) (*models.PaginatedKVEntries, error) {
+	ac, kv, err := b.kvBucket(connectionID, bucketName)
+	if err != nil {
+		return nil, err
 	}
 
 	if offset < 0 {
@@ -1883,24 +2036,18 @@ func (b *Bridge) GetKVEntriesPaginated(connectionID, bucketName string, offset, 
 
 	searchLower := strings.ToLower(searchFilter)
 
-	// Get KV bucket (creates if doesn't exist)
-	kv, err := ac.JS.KeyValue(bucketName)
+	allKeys, err := getCached(&ac.cache.mu, ac.cache.kvEntry(bucketName), b.timeoutConfig.ListCacheTTL, b.timeoutConfig.KVListTimeout,
+		func() ([]string, bool) { return fetchKVKeys(kv) })
 	if err != nil {
-		return nil, fmt.Errorf("failed to get KV bucket: %w", err)
+		return nil, fmt.Errorf("KV keys listing timed out")
 	}
 
-	allEntries, err := getCached(&ac.cache.mu, ac.cache.kvEntry(bucketName), b.timeoutConfig.ListCacheTTL, b.timeoutConfig.KVListTimeout,
-		func() ([]models.KVEntry, bool) { return fetchKVEntries(kv) })
-	if err != nil {
-		return nil, fmt.Errorf("KV entries listing timed out")
-	}
-
-	filtered := allEntries
+	filtered := allKeys
 	if searchLower != "" {
-		filtered = make([]models.KVEntry, 0, len(allEntries))
-		for _, en := range allEntries {
-			if strings.Contains(strings.ToLower(en.Key), searchLower) {
-				filtered = append(filtered, en)
+		filtered = make([]string, 0, len(allKeys))
+		for _, k := range allKeys {
+			if strings.Contains(strings.ToLower(k), searchLower) {
+				filtered = append(filtered, k)
 			}
 		}
 	}
@@ -1915,7 +2062,7 @@ func (b *Bridge) GetKVEntriesPaginated(connectionID, bucketName string, offset, 
 	}
 
 	return &models.PaginatedKVEntries{
-		Entries: append([]models.KVEntry{}, filtered[start:end]...),
+		Entries: fetchKVPage(kv, filtered[start:end]),
 		Total:   total,
 		Offset:  offset,
 		Limit:   limit,

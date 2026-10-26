@@ -420,6 +420,7 @@ function StreamDetail({ stream, connectionId, onClose, onEdit }: {
   const [showFilter, setShowFilter] = useState(false)
   const [filter, setFilter] = useState<ContentFilter>({ type: 'contains', field: '', value: '', negate: false, caseSensitive: true })
   const [filterEnabled, setFilterEnabled] = useState(false)
+  const [subjectFilter, setSubjectFilter] = useState('')
   const [startSeq, setStartSeq] = useState<string>('')
   const [endSeq, setEndSeq] = useState<string>('')
   const [startTime, setStartTime] = useState<string>('')
@@ -437,7 +438,7 @@ function StreamDetail({ stream, connectionId, onClose, onEdit }: {
       const endSeqNum = endSeq ? parseInt(endSeq, 10) : undefined
       const startTimeMs = startTime ? new Date(startTime).getTime() : undefined
       const endTimeMs = endTime ? new Date(endTime).getTime() : undefined
-      const msgs = await api.getStreamMessages(connectionId, stream.name, limit, cf, startSeqNum, endSeqNum, startTimeMs, endTimeMs)
+      const msgs = await api.getStreamMessages(connectionId, stream.name, limit, cf, subjectFilter.trim() || undefined, startSeqNum, endSeqNum, startTimeMs, endTimeMs)
       setMessages(msgs ?? [])
     } catch (e: any) {
       setError(e.message)
@@ -538,6 +539,8 @@ function StreamDetail({ stream, connectionId, onClose, onEdit }: {
             setFilter={setFilter}
             filterEnabled={filterEnabled}
             setFilterEnabled={setFilterEnabled}
+            subjectFilter={subjectFilter}
+            setSubjectFilter={setSubjectFilter}
             startSeq={startSeq}
             setStartSeq={setStartSeq}
             endSeq={endSeq}
@@ -563,7 +566,7 @@ function StreamDetail({ stream, connectionId, onClose, onEdit }: {
 }
 
 function MessagesTab({ messages, loading, error, limit, setLimit, showFilter, setShowFilter,
-  filter, setFilter, filterEnabled, setFilterEnabled, startSeq, setStartSeq, endSeq, setEndSeq,
+  filter, setFilter, filterEnabled, setFilterEnabled, subjectFilter, setSubjectFilter, startSeq, setStartSeq, endSeq, setEndSeq,
   startTime, setStartTime, endTime, setEndTime, onFetch, expandedIdx, setExpandedIdx, connectionId, streamName }: any) {
   const [showReplay, setShowReplay] = useState(false)
   return (
@@ -581,14 +584,14 @@ function MessagesTab({ messages, loading, error, limit, setLimit, showFilter, se
         <button onClick={() => setShowFilter(!showFilter)} style={{
           display: 'flex', alignItems: 'center', gap: '5px',
           padding: '6px 11px', borderRadius: '6px',
-          background: filterEnabled ? 'rgba(245,158,11,0.1)' : 'var(--bg-elevated)',
-          border: `1px solid ${filterEnabled ? 'rgba(245,158,11,0.35)' : 'var(--border)'}`,
-          color: filterEnabled ? 'var(--amber)' : 'var(--text-secondary)',
+          background: (filterEnabled || subjectFilter.trim()) ? 'rgba(245,158,11,0.1)' : 'var(--bg-elevated)',
+          border: `1px solid ${(filterEnabled || subjectFilter.trim()) ? 'rgba(245,158,11,0.35)' : 'var(--border)'}`,
+          color: (filterEnabled || subjectFilter.trim()) ? 'var(--amber)' : 'var(--text-secondary)',
           cursor: 'pointer', fontSize: '12px', fontFamily: 'var(--font-sans)',
         }}>
           <Filter size={12} />
-          Content Filter
-          {filterEnabled && filter.value && (
+          Filters
+          {((filterEnabled && filter.value) || subjectFilter.trim()) && (
             <span style={{ background: 'var(--amber)', color: '#000', fontSize: '10px', fontWeight: 700, borderRadius: '10px', padding: '1px 5px' }}>ON</span>
           )}
         </button>
@@ -682,6 +685,11 @@ function MessagesTab({ messages, loading, error, limit, setLimit, showFilter, se
           background: 'var(--bg-surface)', border: '1px solid rgba(245,158,11,0.25)',
           borderRadius: '8px', padding: '12px', marginBottom: '12px',
         }}>
+          <div style={{ marginBottom: '14px', paddingBottom: '12px', borderBottom: '1px solid var(--border-subtle)' }}>
+            <label style={labelStyle}>Subject Filter <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>(optional — supports * and &gt; wildcards)</span></label>
+            <input value={subjectFilter} onChange={(e: any) => setSubjectFilter(e.target.value)}
+              placeholder="e.g. orders.created or orders.>" style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }} />
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
             <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--amber)' }}>Content Filter</span>
             <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', cursor: 'pointer' }}>
@@ -753,7 +761,7 @@ function MessagesTab({ messages, loading, error, limit, setLimit, showFilter, se
         <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-dim)' }}>
           <MessageSquare size={24} style={{ margin: '0 auto 10px', opacity: 0.3 }} />
           <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>No messages found</p>
-          <p style={{ fontSize: '12px', marginTop: '4px' }}>Try increasing the limit or adjusting your filter</p>
+          <p style={{ fontSize: '12px', marginTop: '4px' }}>No messages in the whole stream matched — try adjusting your filters</p>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
